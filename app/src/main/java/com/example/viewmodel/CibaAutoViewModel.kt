@@ -1,11 +1,15 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.model.*
 import com.example.obd.ObdManager
+import com.example.data.DtcLibrary
 import com.example.car.TelemetryBridge
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -125,15 +129,17 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
         demoJob?.cancel()
 
         com.example.service.ObdForegroundService.start(getApplication())
+        startGpsSpeed()
+        startGpsSpeed()
         addLog("Modo demonstração ativado: ciclo STANDBY → EV → HÍBRIDO → COMBUSTÃO → CARREGANDO.")
         demoJob = viewModelScope.launch {
             var cycleSeconds = 0f
-            var simSoc = 62
+            var simSoc = 45
             var simTripKm = 4.2f
             var simOdo = 12450f
 
             while (isActive) {
-                val period = 32f // ciclo completo de 32 segundos
+                val period = 40f // ciclo mais longo para cobrir toda a faixa
                 val phase = cycleSeconds % period
 
                 val curSpeed: Float
@@ -158,32 +164,32 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
                     // 2. EV (5s .. 11s): Saída 100% elétrica (bateria -> rodas)
                     phase < 11f -> {
                         val progress = (phase - 5f) / 6f
-                        curSpeed = 6f + progress * 32f // 6 -> 38 km/h
+                        curSpeed = 10f + progress * 50f // 10 -> 60
                         curRpm = 0 // Motor térmico desligado
-                        curPowerKw = 6f + kotlin.math.sin(progress * Math.PI.toFloat()) * 14f // 6 -> 20 kW
+                        curPowerKw = 8f + kotlin.math.sin(progress * Math.PI.toFloat()) * 22f // até ~30 kW
                         curLoad = 18
                         curThrottle = (progress * 28f).toInt()
                         curFuelFlow = 0f
                         curInstantKml = 40f
-                        if (progress > 0.8f && simSoc > 55) simSoc = 61
+                        if (progress > 0.5f) simSoc = (simSoc - 1).coerceAtLeast(25)
                     }
                     // 3. HÍBRIDO (11s .. 19s): Aceleração combinada (combustão + bateria -> rodas)
                     phase < 19f -> {
                         val progress = (phase - 11f) / 8f
-                        curSpeed = 38f + progress * 52f // 38 -> 90 km/h
-                        curRpm = (1300 + progress * 2100).toInt() // 1300 -> 3400 RPM
-                        curPowerKw = 12f + kotlin.math.sin(progress * Math.PI.toFloat()) * 26f // 12 -> 38 kW
-                        curLoad = (45 + progress * 40).toInt()
-                        curThrottle = (40 + progress * 42).toInt()
+                        curSpeed = 60f + progress * 100f // 60 -> 160
+                        curRpm = (1800 + progress * 4200).toInt() // 1800 -> 6000
+                        curPowerKw = 15f + kotlin.math.sin(progress * Math.PI.toFloat()) * 40f // até ~55 kW
+                        curLoad = (40 + progress * 55).toInt() // até ~95%
+                        curThrottle = (30 + progress * 65).toInt() // até ~95%
                         curFuelFlow = 3.2f + progress * 3.4f
                         curInstantKml = 17.2f
-                        if (progress > 0.6f) simSoc = 60
+                        if (progress > 0.5f) simSoc = (simSoc - 2).coerceAtLeast(20)
                     }
                     // 4. COMBUSTÃO (19s .. 25s): Cruzeiro constante em rodovia (motor térmico -> rodas)
                     phase < 25f -> {
                         val progress = (phase - 19f) / 6f
-                        curSpeed = 88f + kotlin.math.sin(progress * Math.PI.toFloat() * 2f) * 2f // ~90 km/h
-                        curRpm = 1720 + (kotlin.math.sin(progress * 4f) * 40).toInt()
+                        curSpeed = 150f + kotlin.math.sin(progress * Math.PI.toFloat() * 2f) * 10f // ~150-160
+                        curRpm = 2800 + (kotlin.math.sin(progress * 4f) * 200).toInt()
                         curPowerKw = 0.6f // Elétrico apenas flutuando em standby
                         curLoad = 35
                         curThrottle = 30
@@ -193,14 +199,14 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
                     // 5. CARREGANDO / REGENERAÇÃO (25s .. 32s): Frenagem regenerativa (rodas -> motor/gerador -> bateria)
                     else -> {
                         val progress = (phase - 25f) / 7f
-                        curSpeed = (90f - progress * 90f).coerceAtLeast(0f) // 90 -> 0 km/h
+                        curSpeed = (160f - progress * 160f).coerceAtLeast(0f) // 160 -> 0
                         curRpm = 0 // Injeção cortada
-                        curPowerKw = -14f - kotlin.math.sin(progress * Math.PI.toFloat()) * 22f // -14 -> -36 kW (recarga!)
+                        curPowerKw = -18f - kotlin.math.sin(progress * Math.PI.toFloat()) * 30f // até ~-48 kW
                         curLoad = 0
                         curThrottle = 0
                         curFuelFlow = 0f
                         curInstantKml = 40f
-                        if (progress > 0.4f) simSoc = 63 // Bateria carregada pela regeneração!
+                        simSoc = (simSoc + 3).coerceAtMost(92)
                     }
                 }
 
@@ -218,19 +224,19 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
                         engineLoad = curLoad,
                         throttlePosition = curThrottle,
                         fuelFlowLitersPerHour = curFuelFlow,
-                        instantConsumption = curInstantKml,
-                        averageConsumption = 22.4f,
+                        instantConsumption = curInstantKml.coerceIn(4f, 35f),
+                        averageConsumption = 8f + (phase / period) * 18f, // 8 -> 26
                         rangeKm = 740,
-                        batteryVoltage = 13.8f,
-                        coolantTemp = 89,
+                        batteryVoltage = 11.8f + (phase / period) * 2.8f, // 11.8 -> 14.6
+                        coolantTemp = (75 + (phase / period * 40)).toInt(), // 75 -> 115
                         intakeTemp = 27,
-                        ethanolPercentage = 27,
+                        ethanolPercentage = (20 + (phase / period * 60)).toInt(), // 20 -> 80
                         fuelTypeLabel = "Gasolina E27",
                         odometerKm = simOdo,
                         tripDistanceKm = simTripKm,
                         tripDurationSec = prev.tripDurationSec + 1,
                         tripAvgSpeed = 52.0f,
-                        tripMaxSpeed = 90f,
+                        tripMaxSpeed = curSpeed.coerceAtLeast(prev.tripMaxSpeed),
                         isConnected = true,
                         connectionState = ConnectionState.CONNECTED,
                         isDemoMode = true
@@ -607,7 +613,9 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
                     )
                 }
                 com.example.service.ObdForegroundService.start(getApplication())
-                addLog("OBD-2 online. Iniciando telemetria real.")
+                addLog("OBD-2 online. Detectando PIDs suportados...")
+                obdManager.probeSupportedPids { msg -> addLog(msg) }
+                addLog("Iniciando telemetria real.")
                 startPidPolling()
                 refreshDiagnostics()
             } else {
@@ -627,6 +635,7 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
         demoJob?.cancel()
         pollingJob?.cancel()
         obdManager.disconnect()
+        stopGpsSpeed()
         com.example.service.ObdForegroundService.stop(getApplication())
         _telemetry.update {
             TelemetryState(
@@ -670,7 +679,7 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
                     title = dtcTitle(code),
                     description = dtcDescription(code),
                     system = dtcSystem(code),
-                    severity = if (code.startsWith("P0") || code.startsWith("P2")) DTCLevel.WARNING else DTCLevel.INFO
+                    severity = dtcSeverity(code)
                 )
             }
             _diagnosticCodes.value = mapped
@@ -720,25 +729,41 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
                             accumulatedTripKm
                         }
 
-                        // 2. Cálculo real de Consumo de Combustível (MAF ou Speed-Density)
-                        val r = (curEthanol / 100f).coerceIn(0f, 1f)
-                        val afr = 14.7f * (1f - r) + 9.0f * r
-                        val density = 745f * (1f - r) + 789f * r
+                        // 2. Cálculo de Consumo (prioriza PID 5E da ECU, depois MAF, depois Speed-Density)
+                        val vehicle = _selectedVehicle.value
+                        val isDiesel = vehicle.fuelType.contains("diesel", ignoreCase = true) ||
+                                       vehicle.fuelType.contains("diesel", ignoreCase = true)
+                        val isFlex = vehicle.fuelType.contains("flex", ignoreCase = true) ||
+                                     vehicle.fuelType.contains("etanol", ignoreCase = true)
 
-                        val mafGps = if (pids.maf != null && pids.maf > 0f) {
-                            pids.maf
-                        } else {
-                            // Método Speed-Density alternativo baseado no MAP + IAT + RPM
-                            val displacementL = _selectedVehicle.value.getDisplacementLiters()
-                            val curMap = pids.manifoldPressure ?: current.manifoldPressure.coerceAtLeast(30f)
-                            val curIat = pids.intakeTemp ?: current.intakeTemp.coerceAtLeast(15)
-                            val imap = (curRpm * curMap) / (curIat + 273.15f)
-                            (imap / 120f) * 0.82f * displacementL * (28.97f / 8.314f)
+                        // AFR e densidade adaptados ao perfil
+                        val (baseAfr, baseDensity) = when {
+                            isDiesel -> 14.5f to 835f
+                            isFlex -> {
+                                val r = (curEthanol / 100f).coerceIn(0f, 1f)
+                                (14.7f * (1f - r) + 9.0f * r) to (745f * (1f - r) + 789f * r)
+                            }
+                            else -> 14.7f to 745f // gasolina
                         }
 
-                        val fuelFlowLph = if (curRpm > 250) {
-                            ((mafGps / (afr * density)) * 3600f).coerceIn(0.2f, 45f)
-                        } else 0f
+                        val fuelFlowLph = when {
+                            // 1. Melhor: taxa de combustível direto da ECU (PID 015E)
+                            pids.fuelRateLph != null && pids.fuelRateLph > 0f -> pids.fuelRateLph
+                            // 2. MAF disponível
+                            pids.maf != null && pids.maf > 0f && curRpm > 250 -> {
+                                ((pids.maf / (baseAfr * baseDensity)) * 3600f).coerceIn(0.2f, 45f)
+                            }
+                            // 3. Speed-Density (usa cilindrada do perfil)
+                            curRpm > 250 -> {
+                                val displacementL = vehicle.getDisplacementLiters()
+                                val curMap = pids.manifoldPressure ?: current.manifoldPressure.coerceAtLeast(30f)
+                                val curIat = pids.intakeTemp ?: current.intakeTemp.coerceAtLeast(15)
+                                val imap = (curRpm * curMap) / (curIat + 273.15f)
+                                val mafGps = (imap / 120f) * 0.82f * displacementL * (28.97f / 8.314f)
+                                ((mafGps / (baseAfr * baseDensity)) * 3600f).coerceIn(0.2f, 45f)
+                            }
+                            else -> 0f
+                        }
 
                         val deltaFuelLiters = fuelFlowLph * (dtSeconds / 3600f)
                         accumulatedFuelLiters += deltaFuelLiters
@@ -834,35 +859,41 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
         _connectionLogs.update { (listOf(message) + it).take(80) }
     }
 
-    private fun dtcTitle(code: String): String = when {
-        code.startsWith("P01") -> "Sistema de Combustível / Sensores"
-        code.startsWith("P02") -> "Injetores / Combustível"
-        code.startsWith("P03") -> "Ignição / Misfire"
-        code.startsWith("P04") -> "Controle de Emissões"
-        code.startsWith("P05") -> "Velocidade / Controle de Marcha Lenta"
-        code.startsWith("P06") -> "Circuito do Computador"
-        code.startsWith("C") -> "Chassis / ABS / Tração"
-        code.startsWith("B") -> "Carroceria"
-        code.startsWith("U") -> "Rede / Comunicação"
-        else -> "Código de Diagnóstico"
+    private fun dtcTitle(code: String): String = DtcLibrary.lookup(code).title
+
+    private fun dtcDescription(code: String): String {
+        val info = DtcLibrary.lookup(code)
+        val parts = mutableListOf(info.description)
+        if (info.possibleCauses.isNotBlank()) parts.add("Possíveis causas: ${info.possibleCauses}")
+        if (info.recommendation.isNotBlank()) parts.add("Recomendação: ${info.recommendation}")
+        return parts.joinToString(" ")
     }
 
-    private fun dtcDescription(code: String): String = when (code) {
-        "P0130", "P0131", "P0132", "P0133", "P0134" -> "Circuito do sensor de oxigênio (Banco 1 Sensor 1)."
-        "P0420" -> "Eficiência do catalisador abaixo do limiar (Banco 1)."
-        "P0171" -> "Sistema muito pobre (Banco 1)."
-        "P0172" -> "Sistema muito rico (Banco 1)."
-        "P0300" -> "Falha de ignição aleatória / múltiplos cilindros."
-        "P0301", "P0302", "P0303", "P0304" -> "Falha de ignição no cilindro específico."
-        else -> "Consulte o manual da ECU ou scanner avançado para detalhes do código $code."
+    private fun dtcSystem(code: String): String = DtcLibrary.lookup(code).system
+
+    private fun dtcSeverity(code: String): DTCLevel = DtcLibrary.lookup(code).severity
+
+
+    private var locationManager: LocationManager? = null
+    private val gpsListener = object : LocationListener {
+        override fun onLocationChanged(loc: Location) {
+            val kmh = (loc.speed * 3.6f).coerceAtLeast(0f)
+            _telemetry.update { it.copy(gpsSpeed = kmh) }
+        }
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) {}
     }
 
-    private fun dtcSystem(code: String): String = when {
-        code.startsWith("P0") || code.startsWith("P2") -> "Powertrain"
-        code.startsWith("C") -> "Chassis"
-        code.startsWith("B") -> "Body"
-        code.startsWith("U") -> "Network"
-        else -> "Desconhecido"
+    fun startGpsSpeed() {
+        try {
+            val ctx = getApplication<Application>()
+            locationManager = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gpsListener)
+        } catch (_: Exception) {}
+    }
+
+    fun stopGpsSpeed() {
+        try { locationManager?.removeUpdates(gpsListener) } catch (_: Exception) {}
     }
 
     override fun onCleared() {
@@ -870,6 +901,7 @@ class CibaAutoViewModel(application: Application) : AndroidViewModel(application
         demoJob?.cancel()
         pollingJob?.cancel()
         obdManager.disconnect()
+        stopGpsSpeed()
         com.example.service.ObdForegroundService.stop(getApplication())
     }
 }

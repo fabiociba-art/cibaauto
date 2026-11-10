@@ -24,6 +24,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -34,6 +35,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.TelemetryState
+import com.example.ui.theme.DynamicGaugeColors
+import com.example.data.InmetroConsumption
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
@@ -56,6 +59,22 @@ enum class GaugeType(val title: String, val unit: String, val maxValue: Float, v
     HV_SOC("SOC BATERIA", "%", 100f, Color(0xFF00FF66), Icons.Default.ElectricCar),
     HV_POWER("POTÊNCIA KW", "KW", 60f, Color(0xFF00E5FF), Icons.Default.Bolt),
     FUEL_PRESSURE("PRESSÃO COMB.", "KPA", 500f, Color(0xFFFF9900), Icons.Default.LocalGasStation)
+}
+
+
+private fun dynamicColorFor(type: GaugeType, value: Float): Color {
+    return when (type) {
+        GaugeType.SPEED -> DynamicGaugeColors.forSpeed(value, type.maxValue)
+        GaugeType.RPM -> DynamicGaugeColors.forRpm(value, type.maxValue)
+        GaugeType.BATTERY -> DynamicGaugeColors.forBatteryVoltage(value)
+        GaugeType.COOLANT -> DynamicGaugeColors.forCoolant(value)
+        GaugeType.LOAD -> DynamicGaugeColors.forLoad(value)
+        GaugeType.THROTTLE -> DynamicGaugeColors.forThrottle(value)
+        GaugeType.INSTANT_KML, GaugeType.AVG_KML -> DynamicGaugeColors.forConsumption(value, InmetroConsumption.forProfile("corolla hybrid", true).referenceGas)
+        GaugeType.HV_SOC, GaugeType.ETHANOL -> DynamicGaugeColors.forSoc(value)
+        GaugeType.HV_POWER -> DynamicGaugeColors.forGeneric(value, type.maxValue, higherIsBetter = false)
+        else -> DynamicGaugeColors.forGeneric(value, type.maxValue)
+    }
 }
 
 /**
@@ -298,13 +317,14 @@ private fun CustomClusterPage(
                     CircularClusterGauge(
                         value = leftValue,
                         maxValue = leftGauge.maxValue,
-                        progressColor = leftGauge.color,
-                        trackColor = Color(0xFF101B2B)
+                        progressColor = dynamicColorFor(leftGauge, leftValue),
+                        trackColor = Color(0xFF101B2B),
+                        invertColor = leftGauge in listOf(GaugeType.INSTANT_KML, GaugeType.AVG_KML, GaugeType.BATTERY, GaugeType.HV_SOC, GaugeType.ETHANOL)
                     )
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
                             text = leftGauge.title,
-                            color = leftGauge.color,
+                            color = dynamicColorFor(leftGauge, leftValue),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.5.sp
@@ -317,7 +337,7 @@ private fun CustomClusterPage(
                             fontWeight = FontWeight.Bold,
                             style = androidx.compose.ui.text.TextStyle(
                                 shadow = Shadow(
-                                    color = leftGauge.color.copy(alpha = 0.6f),
+                                    color = dynamicColorFor(leftGauge, leftValue).copy(alpha = 0.6f),
                                     offset = Offset(0f, 0f),
                                     blurRadius = 16f
                                 )
@@ -346,13 +366,14 @@ private fun CustomClusterPage(
                     CircularClusterGauge(
                         value = rightValue,
                         maxValue = rightGauge.maxValue,
-                        progressColor = rightGauge.color,
-                        trackColor = Color(0xFF101B2B)
+                        progressColor = dynamicColorFor(rightGauge, rightValue),
+                        trackColor = Color(0xFF101B2B),
+                        invertColor = rightGauge in listOf(GaugeType.INSTANT_KML, GaugeType.AVG_KML, GaugeType.BATTERY, GaugeType.HV_SOC, GaugeType.ETHANOL)
                     )
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
                             text = rightGauge.title,
-                            color = rightGauge.color,
+                            color = dynamicColorFor(rightGauge, rightValue),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.5.sp
@@ -365,7 +386,7 @@ private fun CustomClusterPage(
                             fontWeight = FontWeight.Bold,
                             style = androidx.compose.ui.text.TextStyle(
                                 shadow = Shadow(
-                                    color = rightGauge.color.copy(alpha = 0.6f),
+                                    color = dynamicColorFor(rightGauge, rightValue).copy(alpha = 0.6f),
                                     offset = Offset(0f, 0f),
                                     blurRadius = 16f
                                 )
@@ -434,6 +455,43 @@ private fun MetricChip(
     }
 }
 
+private fun colorForAbsoluteValue(value: Float, max: Float, invert: Boolean = false): Color {
+    val green = Color(0xFF00CC55)
+    val yellow = Color(0xFFFFAA00)
+    val red = Color(0xFFFF3333)
+    if (invert) {
+        // Consumo, SOC, bateria: alto = verde, baixo = vermelho
+        val p = (value / max).coerceIn(0f, 1f)
+        return when {
+            p >= 0.7f -> green
+            p >= 0.4f -> lerp(yellow, green, (p - 0.4f) / 0.3f)
+            else -> lerp(red, yellow, (p / 0.4f).coerceIn(0f, 1f))
+        }
+    }
+    return if (max >= 500f) {
+        // RPM: 0-1500 verde, 1501-3000 amarelo, 3001+ vermelho
+        when {
+            value <= 1500f -> green
+            value <= 3000f -> lerp(green, yellow, (value - 1500f) / 1500f)
+            else -> lerp(yellow, red, ((value - 3000f) / 2000f).coerceIn(0f, 1f))
+        }
+    } else if (max >= 100f) {
+        // Velocidade: 0-50 verde, 51-90 amarelo, 91+ vermelho
+        when {
+            value <= 50f -> green
+            value <= 90f -> lerp(green, yellow, (value - 50f) / 40f)
+            else -> lerp(yellow, red, ((value - 90f) / 80f).coerceIn(0f, 1f))
+        }
+    } else {
+        // Percentual: 0-20 verde, 21-50 amarelo, 51+ vermelho
+        when {
+            value <= 20f -> green
+            value <= 50f -> lerp(green, yellow, (value - 20f) / 30f)
+            else -> lerp(yellow, red, ((value - 50f) / 50f).coerceIn(0f, 1f))
+        }
+    }
+}
+
 @Composable
 private fun CircularClusterGauge(
     value: Float,
@@ -441,12 +499,13 @@ private fun CircularClusterGauge(
     progressColor: Color,
     trackColor: Color,
     startAngle: Float = 135f,
-    sweepAngle: Float = 270f
+    sweepAngle: Float = 270f,
+    invertColor: Boolean = false
 ) {
     val progress = (value / maxValue).coerceIn(0f, 1f)
 
     Canvas(modifier = Modifier.fillMaxSize()) {
-        val strokeWidth = 14.dp.toPx()
+        val strokeWidth = 18.dp.toPx()
         val diameter = min(size.width, size.height) - strokeWidth
         val topLeft = Offset((size.width - diameter) / 2f, (size.height - diameter) / 2f)
         val arcSize = Size(diameter, diameter)
@@ -462,17 +521,26 @@ private fun CircularClusterGauge(
             style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
         )
 
-        // Arco de progresso brilhante
+        // Arco — cor baseada no valor absoluto de cada segmento
         val progressSweep = sweepAngle * progress
-        drawArc(
-            color = progressColor,
-            startAngle = startAngle,
-            sweepAngle = progressSweep,
-            useCenter = false,
-            topLeft = topLeft,
-            size = arcSize,
-            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-        )
+        if (progressSweep > 0f) {
+            val segments = 28
+            val segSweep = progressSweep / segments
+            for (i in 0 until segments) {
+                val segProgress = (i + 0.5f) / segments * progress
+                val absoluteValue = segProgress * maxValue
+                val segColor = colorForAbsoluteValue(absoluteValue, maxValue, invertColor)
+                drawArc(
+                    color = segColor,
+                    startAngle = startAngle + i * segSweep,
+                    sweepAngle = segSweep + 0.4f,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                )
+            }
+        }
 
         // Marcas de escala
         for (i in 0..8) {

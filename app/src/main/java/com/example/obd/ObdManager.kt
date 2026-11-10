@@ -75,6 +75,7 @@ class ObdManager {
         val batteryVoltage: Float? = null,
         val ethanolPercentage: Int? = null,
         val maf: Float? = null,
+        val fuelRateLph: Float? = null,
         val fuelPressure: Float? = null,
         val odometerKm: Float? = null,
         val fuelLevelPercent: Float? = null,
@@ -432,6 +433,15 @@ class ObdManager {
     var ecuResponding: Boolean = false
         private set
 
+    /** PIDs Mode 01 suportados pelo carro (detectados na conexão). */
+    private val supportedPids = mutableSetOf<String>()
+
+    /** Verifica se um PID Mode 01 é suportado (ex.: "0C", "10", "5E"). */
+    fun isPidSupported(pid: String): Boolean {
+        if (supportedPids.isEmpty()) return true // ainda não detectou, tenta tudo
+        return supportedPids.contains(pid.uppercase())
+    }
+
     /**
      * ATSP0 faz o ELM327 procurar o protocolo na PRIMEIRA consulta ("SEARCHING...").
      * Isso leva vários segundos e estourava o timeout de 3 s: a resposta era descartada no
@@ -458,6 +468,35 @@ class ObdManager {
             else "ECU NÃO respondeu. Ligue o carro (READY), confira o adaptador na porta OBD e tente de novo."
         )
     }
+
+    /**
+     * Detecta quais PIDs Mode 01 o carro suporta (lendo 0100, 0120, 0140, 0160).
+     * Chamar uma vez após a conexão.
+     */
+    suspend fun probeSupportedPids(onLog: (String) -> Unit = {}) {
+        supportedPids.clear()
+        val ranges = listOf("00" to 0x01, "20" to 0x21, "40" to 0x41, "60" to 0x61)
+        for ((pid, base) in ranges) {
+            val resp = cleanHex(sendCommand("01$pid", 5000L))
+            val idx = resp.indexOf("41$pid")
+            if (idx < 0 || resp.length < idx + 12) continue
+            try {
+                val a = resp.substring(idx + 4, idx + 6).toInt(16)
+                val b = resp.substring(idx + 6, idx + 8).toInt(16)
+                val c = resp.substring(idx + 8, idx + 10).toInt(16)
+                val d = resp.substring(idx + 10, idx + 12).toInt(16)
+                val mask = (a shl 24) or (b shl 16) or (c shl 8) or d
+                for (bit in 0 until 32) {
+                    if ((mask and (1 shl (31 - bit))) != 0) {
+                        val p = base + bit
+                        if (p <= 0xFF) supportedPids.add("%02X".format(p))
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        onLog("PIDs suportados detectados: ${supportedPids.size} (${supportedPids.sorted().take(12).joinToString()}${if (supportedPids.size > 12) "..." else ""})")
+    }
+
 
     suspend fun sendCommand(command: String, timeoutMs: Long = CMD_TIMEOUT_MS): String = withContext(Dispatchers.IO) {
         if (!isConnected.get()) return@withContext "NOT CONNECTED"
@@ -516,21 +555,23 @@ class ObdManager {
         if (!isConnected.get()) return@withContext PidResult()
         pidCycleCount++
 
-        val rpm = parseRpm(sendCommand("010C"))
-        val speed = parseSpeed(sendCommand("010D"))
-        val coolant = parseTemp(sendCommand("0105"))
-        val intake = parseTemp(sendCommand("010F"))
-        val load = parsePercent(sendCommand("0104"))
-        val map = parseMap(sendCommand("010B"))
-        val tps = parsePercent(sendCommand("0111"))
-        val voltage = parseVoltage(sendCommand("0142"))
-        val maf = parseMaf(sendCommand("0110"))
-        val fuelPress = parseFuelPressure(sendCommand("010A"))
+        val rpm = if (isPidSupported("0C")) parseRpm(sendCommand("010C")) else null
+        val speed = if (isPidSupported("0D")) parseSpeed(sendCommand("010D")) else null
+        val coolant = if (isPidSupported("05")) parseTemp(sendCommand("0105")) else null
+        val intake = if (isPidSupported("0F")) parseTemp(sendCommand("010F")) else null
+        val load = if (isPidSupported("04")) parsePercent(sendCommand("0104")) else null
+        val map = if (isPidSupported("0B")) parseMap(sendCommand("010B")) else null
+        val tps = if (isPidSupported("11")) parsePercent(sendCommand("0111")) else null
+        val voltage = if (isPidSupported("42")) parseVoltage(sendCommand("0142")) else null
+        val maf = if (isPidSupported("10")) parseMaf(sendCommand("0110")) else null
+        val fuelPress = if (isPidSupported("0A")) parseFuelPressure(sendCommand("010A")) else null
+        // PID 5E = Engine Fuel Rate (L/h) — preferido quando disponível
+        val fuelRateLph = if (isPidSupported("5E")) parseFuelRate(sendCommand("015E")) else null
 
         // PIDs de menor frequência (economiza banda no barramento e acelera medidores rápidos)
-        val ethanol = if (pidCycleCount % 6 == 0 || pidCycleCount == 1) parseEthanol(sendCommand("0152")) else null
-        val fuelLevel = if (pidCycleCount % 10 == 0 || pidCycleCount == 1) parseFuelLevel(sendCommand("012F")) else null
-        val odo = if (pidCycleCount % 15 == 0 || pidCycleCount == 1) parseOdometer(sendCommand("01A6")) else null
+        val ethanol = if (isPidSupported("52") && (pidCycleCount % 6 == 0 || pidCycleCount == 1)) parseEthanol(sendCommand("0152")) else null
+        val fuelLevel = if (isPidSupported("2F") && (pidCycleCount % 10 == 0 || pidCycleCount == 1)) parseFuelLevel(sendCommand("012F")) else null
+        val odo = if (isPidSupported("A6") && (pidCycleCount % 15 == 0 || pidCycleCount == 1)) parseOdometer(sendCommand("01A6")) else null
 
         // Sistema híbrido: 1) PID padrão SAE 01 5B (vida restante da bateria HV) e
         // 2) Mode 21 proprietário (experimental, desligado por padrão — veja EXPERIMENTAL_TOYOTA_MODE21).
@@ -573,6 +614,7 @@ class ObdManager {
             batteryVoltage = voltage,
             ethanolPercentage = ethanol,
             maf = maf,
+            fuelRateLph = fuelRateLph,
             fuelPressure = fuelPress,
             odometerKm = odo,
             fuelLevelPercent = fuelLevel,
@@ -857,6 +899,18 @@ class ObdManager {
         if (idx < 0 || c.length < idx + 6) return null
         return try {
             (c.substring(idx + 4, idx + 6).toInt(16) * 100) / 255
+        } catch (_: Exception) { null }
+    }
+
+    /** PID 015E — Engine fuel rate (L/h). Formula: ((A*256)+B)*0.05 */
+    private fun parseFuelRate(resp: String): Float? {
+        val c = cleanHex(resp)
+        val idx = c.indexOf("415E")
+        if (idx < 0 || c.length < idx + 8) return null
+        return try {
+            val a = c.substring(idx + 4, idx + 6).toInt(16)
+            val b = c.substring(idx + 6, idx + 8).toInt(16)
+            ((a * 256) + b) * 0.05f
         } catch (_: Exception) { null }
     }
 

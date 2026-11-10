@@ -259,29 +259,38 @@ class CibaAutoCarScreen(carContext: CarContext) : Screen(carContext) {
         val rangeText = if (t.rangeKm > 0) "${t.rangeKm} km" else if (t.isConnected) "Calculando..." else "— km"
         val odoText = if (t.odometerKm > 0f) String.format("%,.0f km", t.odometerKm) else "— km"
 
+        val speedIcon = CarGaugeBitmapGenerator.gaugeIcon(t.speed, 200f, "VEL", "km/h", "speed")
+        val rpmIcon = CarGaugeBitmapGenerator.gaugeIcon(t.rpm.toFloat(), 7000f, "RPM", "rpm", "rpm")
+        val batIcon = CarGaugeBitmapGenerator.gaugeIcon(t.batteryVoltage, 16f, "BAT", "V", "battery")
+        val tempIcon = CarGaugeBitmapGenerator.gaugeIcon(t.coolantTemp.toFloat(), 130f, "AGUA", "°C", "temp")
+
         val pane = Pane.Builder()
             .addRow(
                 Row.Builder()
                     .setTitle("$speed km/h")
-                    .addText("Velocidade Instantânea  •  Marcha: $gearEstimate")
+                    .addText("Marcha: $gearEstimate")
+                    .setImage(speedIcon, Row.IMAGE_TYPE_LARGE)
                     .build()
             )
             .addRow(
                 Row.Builder()
                     .setTitle("$rpm RPM")
-                    .addText("Rotação do Motor a Combustão")
+                    .addText("Rotação")
+                    .setImage(rpmIcon, Row.IMAGE_TYPE_LARGE)
                     .build()
             )
             .addRow(
                 Row.Builder()
-                    .setTitle("Autonomia: $rangeText  |  Odômetro: $odoText")
-                    .addText(vehicleName)
+                    .setTitle("${String.format("%.1f", t.batteryVoltage)} V")
+                    .addText("Bateria 12V")
+                    .setImage(batIcon, Row.IMAGE_TYPE_LARGE)
                     .build()
             )
             .addRow(
                 Row.Builder()
-                    .setTitle("Bateria 12V: ${String.format("%.1f", t.batteryVoltage)} V  |  Água: ${t.coolantTemp} °C")
-                    .addText("Status Elétrico e Arrefecimento")
+                    .setTitle("${t.coolantTemp} °C")
+                    .addText("Temperatura da água")
+                    .setImage(tempIcon, Row.IMAGE_TYPE_LARGE)
                     .build()
             )
             .addAction(

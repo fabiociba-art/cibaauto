@@ -214,6 +214,15 @@ fun AndroidAutoClusterScreen(telemetry: TelemetryState) {
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.5.sp
                         )
+                        if (telemetry.gpsSpeed > 0.5f) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "GPS ${telemetry.gpsSpeed.toInt()}",
+                                color = Color(0xFF64748B),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
 
@@ -414,6 +423,27 @@ private fun TopMetricCard(
     }
 }
 
+private fun colorForAbsoluteValue(value: Float, max: Float, isSpeedometer: Boolean): Color {
+    val green = Color(0xFF00CC55)
+    val yellow = Color(0xFFFFAA00)
+    val red = Color(0xFFFF3333)
+    return if (isSpeedometer) {
+        // Verde 0-50, Amarelo 51-90, Vermelho 91+
+        when {
+            value <= 50f -> green
+            value <= 90f -> androidx.compose.ui.graphics.lerp(green, yellow, (value - 50f) / 40f)
+            else -> androidx.compose.ui.graphics.lerp(yellow, red, ((value - 90f) / 80f).coerceIn(0f, 1f))
+        }
+    } else {
+        // Verde 0-1500, Amarelo 1501-3000, Vermelho 3001+
+        when {
+            value <= 1500f -> green
+            value <= 3000f -> androidx.compose.ui.graphics.lerp(green, yellow, (value - 1500f) / 1500f)
+            else -> androidx.compose.ui.graphics.lerp(yellow, red, ((value - 3000f) / 2000f).coerceIn(0f, 1f))
+        }
+    }
+}
+
 @Composable
 private fun AdvancedCircularGauge(
     value: Float,
@@ -446,17 +476,26 @@ private fun AdvancedCircularGauge(
             style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
         )
 
-        // Progress Arc (Neon)
+        // Progress Arc — cor baseada no valor absoluto representado por cada segmento
         val progressSweep = sweepAngle * progress
-        drawArc(
-            color = progressColor,
-            startAngle = startAngle,
-            sweepAngle = progressSweep,
-            useCenter = false,
-            topLeft = topLeft,
-            size = arcSize,
-            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-        )
+        if (progressSweep > 0f) {
+            val segments = 28
+            val segSweep = progressSweep / segments
+            for (i in 0 until segments) {
+                val segProgress = (i + 0.5f) / segments * progress   // 0..progress
+                val absoluteValue = segProgress * maxValue
+                val segColor = colorForAbsoluteValue(absoluteValue, maxValue, isSpeedometer)
+                drawArc(
+                    color = segColor,
+                    startAngle = startAngle + i * segSweep,
+                    sweepAngle = segSweep + 0.5f,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                )
+            }
+        }
 
         // Tick marks & numbers representation
         val tickCount = if (isSpeedometer) 10 else 8

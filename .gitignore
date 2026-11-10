@@ -16,3 +16,7 @@
 local.properties
 .env
 debug.keystore
+.aistudio/
+.cg/
+extracted_tmp/
+real_obd_tmp/

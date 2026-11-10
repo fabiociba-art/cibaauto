@@ -88,6 +88,30 @@ object PreloadedVehicles {
       fuelType = "Flex (Etanol / Gasolina)", horsepower = "175 cv (Etanol) / 169 cv (Gasolina)",
       torque = "21,3 kgfm", transmission = "Direct Shift CVT", drivetrain = "Tração Dianteira (FWD)",
       tankCapacity = "50 litros", isHybrid = false, notes = "Motor D-4S.")
+  val corollaXei2025 = VehicleProfile(
+      id = "corolla_xei_2025", brand = "Toyota", model = "Corolla", version = "XEi",
+      year = "2025", engine = "2.0L Dynamic Force Dual VVT-iE", displacement = "1.987 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "175 cv (Etanol) / 169 cv (Gasolina)",
+      torque = "21,3 kgfm", transmission = "Direct Shift CVT", drivetrain = "Tração Dianteira (FWD)",
+      tankCapacity = "50 litros", isHybrid = false, notes = "Versão intermediária 2.0 flex.")
+  val corollaGli2025 = VehicleProfile(
+      id = "corolla_gli_2025", brand = "Toyota", model = "Corolla", version = "GLi",
+      year = "2025", engine = "2.0L Dynamic Force Dual VVT-iE", displacement = "1.987 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "175 cv (Etanol) / 169 cv (Gasolina)",
+      torque = "21,3 kgfm", transmission = "Direct Shift CVT", drivetrain = "Tração Dianteira (FWD)",
+      tankCapacity = "50 litros", isHybrid = false, notes = "Versão de entrada 2.0 flex.")
+  val corollaCrossXre2025 = VehicleProfile(
+      id = "corolla_cross_xre_2025", brand = "Toyota", model = "Corolla Cross", version = "XRE",
+      year = "2025", engine = "2.0L Dynamic Force Dual VVT-iE", displacement = "1.987 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "175 cv (Etanol) / 169 cv (Gasolina)",
+      torque = "21,3 kgfm", transmission = "Direct Shift CVT", drivetrain = "Tração Dianteira (FWD)",
+      tankCapacity = "47 litros", isHybrid = false, notes = "SUV 2.0 flex.")
+  val yaris2025 = VehicleProfile(
+      id = "yaris_2025", brand = "Toyota", model = "Yaris", version = "XLS",
+      year = "2025", engine = "1.5L Dual VVT-i", displacement = "1.490 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "110 cv (Etanol)",
+      torque = "14,9 kgfm", transmission = "CVT", drivetrain = "Tração Dianteira (FWD)",
+      tankCapacity = "45 litros", isHybrid = false, notes = "Hatch compacto.")
   val corollaHybrid2025 = VehicleProfile(
       id = "corolla_hybrid_2025", brand = "Toyota", model = "Corolla", version = "Altis Hybrid",
       year = "2025", engine = "1.8L VVT-i Flex + Elétrico", displacement = "1.798 cm³",
@@ -371,20 +395,114 @@ object PreloadedVehicles {
       transmission = "DCT 7 marchas", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "55 litros",
       isHybrid = false, notes = "SUV médio Ford.")
 
+  // ========== ADICIONAIS ==========
+  val cronos2025 = VehicleProfile(
+      id = "fiat_cronos_2025", brand = "Fiat", model = "Cronos", version = "Drive 1.3",
+      year = "2025", engine = "1.3 Firefly Flex", displacement = "1.332 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "109 cv (Etanol)", torque = "14,2 kgfm",
+      transmission = "CVT", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "48 litros",
+      isHybrid = false, notes = "Sedã compacto Fiat.")
+  val gol2025 = VehicleProfile(
+      id = "vw_gol_2025", brand = "Volkswagen", model = "Gol", version = "1.0",
+      year = "2025", engine = "1.0 MPI", displacement = "999 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "84 cv", torque = "10,4 kgfm",
+      transmission = "Manual 5 marchas", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "55 litros",
+      isHybrid = false, notes = "Hatch popular.")
+  val amarok2025 = VehicleProfile(
+      id = "vw_amarok_2025", brand = "Volkswagen", model = "Amarok", version = "V6",
+      year = "2025", engine = "3.0 V6 Turbo Diesel", displacement = "2.967 cm³",
+      fuelType = "Diesel", horsepower = "258 cv", torque = "58 kgfm",
+      transmission = "Automático 8 marchas", drivetrain = "4x4", tankCapacity = "80 litros",
+      isHybrid = false, notes = "Picape média VW.")
+  val onixPlus2025 = VehicleProfile(
+      id = "gm_onix_plus_2025", brand = "Chevrolet", model = "Onix Plus", version = "Premier",
+      year = "2025", engine = "1.0 Turbo", displacement = "999 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "116 cv", torque = "16,8 kgfm",
+      transmission = "Automático 6 marchas", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "44 litros",
+      isHybrid = false, notes = "Sedã compacto.")
+  val spin2025 = VehicleProfile(
+      id = "gm_spin_2025", brand = "Chevrolet", model = "Spin", version = "Premier",
+      year = "2025", engine = "1.8 Flex", displacement = "1.796 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "111 cv", torque = "17,7 kgfm",
+      transmission = "Automático 6 marchas", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "54 litros",
+      isHybrid = false, notes = "Minivan 7 lugares.")
+  val hb20s2025 = VehicleProfile(
+      id = "hyundai_hb20s_2025", brand = "Hyundai", model = "HB20S", version = "Platinum",
+      year = "2025", engine = "1.0 Turbo", displacement = "998 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "120 cv", torque = "17,5 kgfm",
+      transmission = "Automático 6 marchas", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "50 litros",
+      isHybrid = false, notes = "Sedã compacto Hyundai.")
+  val versa2025 = VehicleProfile(
+      id = "nissan_versa_2025", brand = "Nissan", model = "Versa", version = "Exclusive",
+      year = "2025", engine = "1.6 Flex", displacement = "1.598 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "114 cv", torque = "15,5 kgfm",
+      transmission = "CVT", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "41 litros",
+      isHybrid = false, notes = "Sedã compacto Nissan.")
+  val frontier2025 = VehicleProfile(
+      id = "nissan_frontier_2025", brand = "Nissan", model = "Frontier", version = "Platinum",
+      year = "2025", engine = "2.3 Turbo Diesel", displacement = "2.298 cm³",
+      fuelType = "Diesel", horsepower = "190 cv", torque = "45 kgfm",
+      transmission = "Automático 7 marchas", drivetrain = "4x4", tankCapacity = "80 litros",
+      isHybrid = false, notes = "Picape média Nissan.")
+  val ka2025 = VehicleProfile(
+      id = "ford_ka_2025", brand = "Ford", model = "Ka", version = "SE Plus",
+      year = "2025", engine = "1.5 Flex", displacement = "1.499 cm³",
+      fuelType = "Flex (Etanol / Gasolina)", horsepower = "136 cv", torque = "15,7 kgfm",
+      transmission = "Automático 6 marchas", drivetrain = "Tração Dianteira (FWD)", tankCapacity = "52 litros",
+      isHybrid = false, notes = "Hatch compacto.")
+
+  // ========== LOTE EXTRA ==========
+  val corollaCrossGrs2025 = VehicleProfile(id = "corolla_cross_grs_2025", brand = "Toyota", model = "Corolla Cross", version = "GR-Sport", year = "2025", engine = "2.0L Dynamic Force", displacement = "1.987 cm³", fuelType = "Flex", horsepower = "177 cv", torque = "21,4 kgfm", transmission = "CVT", drivetrain = "FWD", tankCapacity = "47 litros", isHybrid = false, notes = "Versão esportiva.")
+  val sw4_2025 = VehicleProfile(id = "toyota_sw4_2025", brand = "Toyota", model = "SW4", version = "SRX", year = "2025", engine = "2.8 Turbo Diesel", displacement = "2.755 cm³", fuelType = "Diesel", horsepower = "204 cv", torque = "50 kgfm", transmission = "Automático 6", drivetrain = "4x4", tankCapacity = "80 litros", isHybrid = false, notes = "SUV médio.")
+  val etios2025 = VehicleProfile(id = "toyota_etios_2025", brand = "Toyota", model = "Etios", version = "XLS", year = "2025", engine = "1.5 Flex", displacement = "1.496 cm³", fuelType = "Flex", horsepower = "107 cv", torque = "14,3 kgfm", transmission = "Manual", drivetrain = "FWD", tankCapacity = "45 litros", isHybrid = false, notes = "Compacto.")
+  val fiatTitano2025 = VehicleProfile(id = "fiat_titano_2025", brand = "Fiat", model = "Titano", version = "Ranch", year = "2025", engine = "2.2 Turbo Diesel", displacement = "2.179 cm³", fuelType = "Diesel", horsepower = "180 cv", torque = "40 kgfm", transmission = "Automático 6", drivetrain = "4x4", tankCapacity = "80 litros", isHybrid = false, notes = "Picape média Fiat.")
+  val fiat500e2025 = VehicleProfile(id = "fiat_500e_2025", brand = "Fiat", model = "500e", version = "Icon", year = "2025", engine = "Elétrico", displacement = "-", fuelType = "Elétrico", horsepower = "118 cv", torque = "22 kgfm", transmission = "Automático", drivetrain = "FWD", tankCapacity = "-", isHybrid = false, notes = "Elétrico.")
+  val vwTaos2025 = VehicleProfile(id = "vw_taos_2025", brand = "Volkswagen", model = "Taos", version = "Highline", year = "2025", engine = "1.4 TSI", displacement = "1.395 cm³", fuelType = "Flex", horsepower = "150 cv", torque = "25,5 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "SUV médio.")
+  val vwJetta2025 = VehicleProfile(id = "vw_jetta_2025", brand = "Volkswagen", model = "Jetta", version = "GLI", year = "2025", engine = "2.0 TSI", displacement = "1.984 cm³", fuelType = "Gasolina", horsepower = "230 cv", torque = "35,7 kgfm", transmission = "DSG 7", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "Sedã esportivo.")
+  val gmEquinox2025 = VehicleProfile(id = "gm_equinox_2025", brand = "Chevrolet", model = "Equinox", version = "Premier", year = "2025", engine = "1.5 Turbo", displacement = "1.490 cm³", fuelType = "Flex", horsepower = "172 cv", torque = "27,5 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "59 litros", isHybrid = false, notes = "SUV médio.")
+  val gmCruze2025 = VehicleProfile(id = "gm_cruze_2025", brand = "Chevrolet", model = "Cruze", version = "Premier", year = "2025", engine = "1.4 Turbo", displacement = "1.399 cm³", fuelType = "Flex", horsepower = "153 cv", torque = "24,5 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "52 litros", isHybrid = false, notes = "Sedã médio.")
+  val hyTucson2025 = VehicleProfile(id = "hyundai_tucson_2025", brand = "Hyundai", model = "Tucson", version = "Limited", year = "2025", engine = "1.6 Turbo", displacement = "1.598 cm³", fuelType = "Flex", horsepower = "180 cv", torque = "27 kgfm", transmission = "Automático 7", drivetrain = "FWD", tankCapacity = "54 litros", isHybrid = false, notes = "SUV médio.")
+  val hyI30_2025 = VehicleProfile(id = "hyundai_i30_2025", brand = "Hyundai", model = "i30", version = "N Line", year = "2025", engine = "1.0 Turbo", displacement = "998 cm³", fuelType = "Flex", horsepower = "120 cv", torque = "17,5 kgfm", transmission = "Automático 7", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "Hatch médio.")
+  val hondaCivic2025 = VehicleProfile(id = "honda_civic_2025", brand = "Honda", model = "Civic", version = "Touring", year = "2025", engine = "1.5 Turbo", displacement = "1.498 cm³", fuelType = "Gasolina", horsepower = "173 cv", torque = "22,4 kgfm", transmission = "CVT", drivetrain = "FWD", tankCapacity = "47 litros", isHybrid = false, notes = "Sedã médio.")
+  val hondaCityHatch2025 = VehicleProfile(id = "honda_city_hatch_2025", brand = "Honda", model = "City Hatch", version = "Touring", year = "2025", engine = "1.5 Flex", displacement = "1.498 cm³", fuelType = "Flex", horsepower = "126 cv", torque = "15,8 kgfm", transmission = "CVT", drivetrain = "FWD", tankCapacity = "41 litros", isHybrid = false, notes = "Hatch compacto.")
+  val renDuster2025 = VehicleProfile(id = "renault_duster_2025", brand = "Renault", model = "Duster", version = "Iconic", year = "2025", engine = "1.6 Flex", displacement = "1.598 cm³", fuelType = "Flex", horsepower = "120 cv", torque = "16,2 kgfm", transmission = "CVT", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "SUV compacto.")
+  val renOroch2025 = VehicleProfile(id = "renault_oroch_2025", brand = "Renault", model = "Oroch", version = "Outsider", year = "2025", engine = "1.6 Flex", displacement = "1.598 cm³", fuelType = "Flex", horsepower = "120 cv", torque = "16,2 kgfm", transmission = "CVT", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "Picape compacta.")
+  val caoaTiggo8_2025 = VehicleProfile(id = "caoa_tiggo8_2025", brand = "Caoa Chery", model = "Tiggo 8", version = "Pro", year = "2025", engine = "1.6 Turbo", displacement = "1.598 cm³", fuelType = "Flex", horsepower = "187 cv", torque = "29 kgfm", transmission = "DCT 7", drivetrain = "FWD", tankCapacity = "51 litros", isHybrid = false, notes = "SUV 7 lugares.")
+  val peugeot208_2025 = VehicleProfile(id = "peugeot_208_2025", brand = "Peugeot", model = "208", version = "Griffe", year = "2025", engine = "1.0 Turbo", displacement = "999 cm³", fuelType = "Flex", horsepower = "130 cv", torque = "20,4 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "47 litros", isHybrid = false, notes = "Hatch compacto.")
+  val peugeot2008_2025 = VehicleProfile(id = "peugeot_2008_2025", brand = "Peugeot", model = "2008", version = "Allure", year = "2025", engine = "1.0 Turbo", displacement = "999 cm³", fuelType = "Flex", horsepower = "130 cv", torque = "20,4 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "SUV compacto.")
+  val citroenC3_2025 = VehicleProfile(id = "citroen_c3_2025", brand = "Citroën", model = "C3", version = "Feel", year = "2025", engine = "1.0 Turbo", displacement = "999 cm³", fuelType = "Flex", horsepower = "130 cv", torque = "20,4 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "47 litros", isHybrid = false, notes = "Hatch compacto.")
+  val citroenC4Cactus2025 = VehicleProfile(id = "citroen_c4_cactus_2025", brand = "Citroën", model = "C4 Cactus", version = "Shine", year = "2025", engine = "1.6 Turbo", displacement = "1.598 cm³", fuelType = "Flex", horsepower = "173 cv", torque = "24,5 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "55 litros", isHybrid = false, notes = "SUV compacto.")
+  val mitsubishiOutlander2025 = VehicleProfile(id = "mitsubishi_outlander_2025", brand = "Mitsubishi", model = "Outlander", version = "HPE", year = "2025", engine = "2.4 Flex", displacement = "2.360 cm³", fuelType = "Flex", horsepower = "167 cv", torque = "22,9 kgfm", transmission = "CVT", drivetrain = "4x4", tankCapacity = "60 litros", isHybrid = false, notes = "SUV médio.")
+  val mitsubishiL200_2025 = VehicleProfile(id = "mitsubishi_l200_2025", brand = "Mitsubishi", model = "L200 Triton", version = "Sport", year = "2025", engine = "2.4 Turbo Diesel", displacement = "2.442 cm³", fuelType = "Diesel", horsepower = "190 cv", torque = "43 kgfm", transmission = "Automático 6", drivetrain = "4x4", tankCapacity = "75 litros", isHybrid = false, notes = "Picape média.")
+  val kiaSportage2025 = VehicleProfile(id = "kia_sportage_2025", brand = "Kia", model = "Sportage", version = "EX", year = "2025", engine = "1.6 Turbo", displacement = "1.598 cm³", fuelType = "Flex", horsepower = "180 cv", torque = "27 kgfm", transmission = "Automático 7", drivetrain = "FWD", tankCapacity = "54 litros", isHybrid = false, notes = "SUV médio.")
+  val kiaCerato2025 = VehicleProfile(id = "kia_cerato_2025", brand = "Kia", model = "Cerato", version = "SX", year = "2025", engine = "2.0 Flex", displacement = "1.999 cm³", fuelType = "Flex", horsepower = "167 cv", torque = "20,6 kgfm", transmission = "Automático 6", drivetrain = "FWD", tankCapacity = "50 litros", isHybrid = false, notes = "Sedã médio.")
+
   val all = listOf(
-      corollaGliHybrid2026, corollaAltis2025, corollaHybrid2025, corollaCrossHybrid2025, yarisCrossHybrid2026, hilux2025,
-      strada2025, argo2025, pulse2025, fastback2025, toro2025, mobi2025,
-      poloTsi2025, tera2026, nivus2025, tcross2025, virtus2025, saveiro2025,
-      onix2025, tracker2025, montana2025, s10_2025,
-      hb20_2025, creta2025, konaHybrid2026,
+      corollaGliHybrid2026, corollaAltis2025, corollaXei2025, corollaGli2025, corollaHybrid2025, corollaCrossHybrid2025, corollaCrossXre2025, yarisCrossHybrid2026, yaris2025, hilux2025,
+      strada2025, argo2025, pulse2025, fastback2025, toro2025, mobi2025, cronos2025,
+      poloTsi2025, tera2026, nivus2025, tcross2025, virtus2025, saveiro2025, gol2025, amarok2025,
+      onix2025, onixPlus2025, tracker2025, montana2025, s10_2025, spin2025,
+      hb20_2025, hb20s2025, creta2025, konaHybrid2026,
       bydSongPro2026, bydAtto2_2026, bydDolphinMini2026, bydDolphin2025,
       havalH6Hev2025, havalH6Phev2026,
       renegade2025, compass2025, commander2025,
       hrV2025, city2025, wrv2025,
       kwid2025, kardian2025,
       tiggo5x2025, tiggo7_2025,
-      kicks2025,
-      ranger2025, territory2025
+      kicks2025, versa2025, frontier2025,
+      ranger2025, territory2025, ka2025,
+      corollaCrossGrs2025, sw4_2025, etios2025,
+      fiatTitano2025, fiat500e2025,
+      vwTaos2025, vwJetta2025,
+      gmEquinox2025, gmCruze2025,
+      hyTucson2025, hyI30_2025,
+      hondaCivic2025, hondaCityHatch2025,
+      renDuster2025, renOroch2025,
+      caoaTiggo8_2025,
+      peugeot208_2025, peugeot2008_2025,
+      citroenC3_2025, citroenC4Cactus2025,
+      mitsubishiOutlander2025, mitsubishiL200_2025,
+      kiaSportage2025, kiaCerato2025
   )
 }
 
@@ -392,6 +510,7 @@ object PreloadedVehicles {
 data class TelemetryState(
     val rpm: Int = 0,
     val speed: Float = 0f,
+    val gpsSpeed: Float = 0f, // km/h from GPS
     val coolantTemp: Int = 0,
     val intakeTemp: Int = 0,
     val batteryVoltage: Float = 0f,
