@@ -1,907 +1,363 @@
 package com.example.viewmodel
 
+import android.Manifest
 import android.app.Application
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.model.*
+import com.example.model.BluetoothDeviceItem
+import com.example.model.DiagnosticsState
+import com.example.model.DriveMode
+import com.example.model.GaugeCatalog
+import com.example.model.DtcKind
+import com.example.model.dtcEntryOf
+import com.example.model.ObdConnectionState
+import com.example.model.TelemetryData
+import com.example.model.VehicleProfile
+import com.example.model.VehicleProfiles
+import com.example.model.toJsonObject
+import com.example.model.vehicleProfileFromJson
+import org.json.JSONArray
 import com.example.obd.ObdManager
-import com.example.data.DtcLibrary
-import com.example.car.TelemetryBridge
-import kotlinx.coroutines.Job
+import com.example.obd.ObdSimulator
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 
-/**
- * ViewModel real — SEM SIMULAÇÃO.
- * Só exibe dados vindos do adaptador OBD-2 físico.
- */
+enum class AppScreen {
+    DASHBOARD,
+    HYBRID_FLOW,
+    DIAGNOSTICS,
+    SETTINGS
+}
+
 class CibaAutoViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val prefs = getApplication<Application>().getSharedPreferences("ciba_auto_prefs", Context.MODE_PRIVATE)
+    private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private val obdManager = ObdManager()
+    private val obdSimulator = ObdSimulator()
 
-    private val _vehicles = MutableStateFlow<List<VehicleProfile>>(loadVehicles())
-    val vehicles: StateFlow<List<VehicleProfile>> = _vehicles.asStateFlow()
+    private val _telemetry = MutableStateFlow(blankTelemetryData())
+    val telemetry: StateFlow<TelemetryData> = _telemetry.asStateFlow()
 
-    private val _selectedVehicle = MutableStateFlow<VehicleProfile>(loadInitialSelectedVehicle())
-    val selectedVehicle: StateFlow<VehicleProfile> = _selectedVehicle.asStateFlow()
+    private val _currentScreen = MutableStateFlow(AppScreen.DASHBOARD)
+    val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
 
-    private val _telemetry = MutableStateFlow(TelemetryState())
-    val telemetry: StateFlow<TelemetryState> = _telemetry.asStateFlow()
+    private val _allProfiles = MutableStateFlow(loadInitialProfiles())
+    val allProfiles: StateFlow<List<VehicleProfile>> = _allProfiles.asStateFlow()
 
-    private val _connectionLogs = MutableStateFlow<List<String>>(
-        listOf("Sistema CIBA AUTO inicializado. Aguardando conexão com adaptador OBD-2.")
+    // Perfil salvo da última vez; se não houver, usa o Corolla GLi Hybrid 2026
+    private val _selectedProfile = MutableStateFlow(
+        prefs.getString(KEY_PROFILE_ID, null)
+            ?.let { id -> _allProfiles.value.firstOrNull { it.id == id } }
+            ?: VehicleProfiles.DEFAULT
     )
-    val connectionLogs: StateFlow<List<String>> = _connectionLogs.asStateFlow()
+    val selectedProfile: StateFlow<VehicleProfile> = _selectedProfile.asStateFlow()
 
-    private val _diagnosticCodes = MutableStateFlow<List<DiagnosticCode>>(emptyList())
-    val diagnosticCodes: StateFlow<List<DiagnosticCode>> = _diagnosticCodes.asStateFlow()
+    private val _isDemoMode = MutableStateFlow(false) // o app abre em modo real (OBD); demo só se o usuário ligar
+    val isDemoMode: StateFlow<Boolean> = _isDemoMode.asStateFlow()
 
-    private val _readinessMonitors = MutableStateFlow<Map<String, String>>(
-        mapOf(
-            "Misfire" to "—",
-            "Fuel System" to "—",
-            "Comprehensive Components" to "—",
-            "Catalyst" to "—",
-            "Evaporative System" to "—",
-            "Oxygen Sensor" to "—",
-            "EGR / VVT" to "—"
-        )
-    )
-    val readinessMonitors: StateFlow<Map<String, String>> = _readinessMonitors.asStateFlow()
+    // ---- Manômetros personalizáveis (sensor de cada posição, salvo entre aberturas do app) ----
+    private val _gaugeSlots = MutableStateFlow(loadGaugeSlots())
+    val gaugeSlots: StateFlow<List<String>> = _gaugeSlots.asStateFlow()
 
-    private val _trips = MutableStateFlow<List<TripRecord>>(emptyList())
-    val trips: StateFlow<List<TripRecord>> = _trips.asStateFlow()
+    val connectionState: StateFlow<ObdConnectionState> = obdManager.connectionState
 
-    private val _ethanolHistory = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
-    val ethanolHistory: StateFlow<List<Pair<String, Int>>> = _ethanolHistory.asStateFlow()
+    // Endereço do adaptador que está conectando agora (só ele mostra "Conectando..." na lista)
+    private val _connectingAddress = MutableStateFlow<String?>(null)
+    val connectingAddress: StateFlow<String?> = _connectingAddress.asStateFlow()
 
-    /** Lista de dispositivos Bluetooth pareados */
-    private val _btDevices = MutableStateFlow<List<ObdManager.BtDeviceInfo>>(emptyList())
-    val btDevices: StateFlow<List<ObdManager.BtDeviceInfo>> = _btDevices.asStateFlow()
+    // true depois que chegou a primeira telemetria da conexão atual (antes disso o ecuLinkOk é falso só por falta de dados)
+    private val _liveDataReceived = MutableStateFlow(false)
+    val liveDataReceived: StateFlow<Boolean> = _liveDataReceived.asStateFlow()
+    val connectedDevice: StateFlow<BluetoothDeviceItem?> = obdManager.connectedDevice
+    val diagnosticLogs: StateFlow<List<String>> = obdManager.diagnosticLogs
 
-    /** Endereço MAC do dispositivo selecionado pelo usuário (null = auto) */
-    private val _selectedBtAddress = MutableStateFlow<String?>(null)
-    val selectedBtAddress: StateFlow<String?> = _selectedBtAddress.asStateFlow()
+    private val _pairedDevices = MutableStateFlow<List<BluetoothDeviceItem>>(emptyList())
+    val pairedDevices: StateFlow<List<BluetoothDeviceItem>> = _pairedDevices.asStateFlow()
 
-    private val _btEnabled = MutableStateFlow(false)
-    val btEnabled: StateFlow<Boolean> = _btEnabled.asStateFlow()
+    // ---- Diagnóstico ----
+    private val _demoDiagnostics = MutableStateFlow(demoDiagnosticsSample())
 
-    private val _vehicleInfo = MutableStateFlow<ObdManager.VehicleInfo?>(null)
-    val vehicleInfo: StateFlow<ObdManager.VehicleInfo?> = _vehicleInfo.asStateFlow()
-
-    private val _vehicleInfoLoading = MutableStateFlow(false)
-    val vehicleInfoLoading: StateFlow<Boolean> = _vehicleInfoLoading.asStateFlow()
-
-    private val _history = MutableStateFlow(ChartHistory())
-    val history: StateFlow<ChartHistory> = _history.asStateFlow()
-
-    private val _isHybridPowerInverted = MutableStateFlow(prefs.getBoolean("invert_hybrid_power_sign", false))
-    val isHybridPowerInverted: StateFlow<Boolean> = _isHybridPowerInverted.asStateFlow()
-
-    fun toggleInvertHybridPowerSign() {
-        val newVal = !_isHybridPowerInverted.value
-        _isHybridPowerInverted.value = newVal
-        prefs.edit().putBoolean("invert_hybrid_power_sign", newVal).apply()
-        addLog(if (newVal) "Inversão de sinal da potência híbrida ATIVADA." else "Inversão de sinal da potência híbrida DESATIVADA.")
-    }
-
-    private var demoJob: Job? = null
-
-    /** Alterna o modo de demonstração simulado com ciclo híbrido completo. */
-    fun toggleDemoMode() {
-        if (_telemetry.value.isDemoMode) {
-            stopDemoMode()
-        } else {
-            startDemoMode()
-        }
-    }
-
-    fun stopDemoMode() {
-        demoJob?.cancel()
-        demoJob = null
-        _telemetry.update {
-            it.copy(
-                isDemoMode = false,
-                isConnected = false,
-                connectionState = ConnectionState.DISCONNECTED
-            )
-        }
-        com.example.service.ObdForegroundService.stop(getApplication())
-        addLog("Modo demonstração finalizado.")
-    }
-
-    fun startDemoMode() {
-        pollingJob?.cancel()
-        obdManager.disconnect()
-        demoJob?.cancel()
-
-        com.example.service.ObdForegroundService.start(getApplication())
-        startGpsSpeed()
-        startGpsSpeed()
-        addLog("Modo demonstração ativado: ciclo STANDBY → EV → HÍBRIDO → COMBUSTÃO → CARREGANDO.")
-        demoJob = viewModelScope.launch {
-            var cycleSeconds = 0f
-            var simSoc = 45
-            var simTripKm = 4.2f
-            var simOdo = 12450f
-
-            while (isActive) {
-                val period = 40f // ciclo mais longo para cobrir toda a faixa
-                val phase = cycleSeconds % period
-
-                val curSpeed: Float
-                val curRpm: Int
-                val curPowerKw: Float
-                val curLoad: Int
-                val curThrottle: Int
-                val curFuelFlow: Float
-                val curInstantKml: Float
-
-                when {
-                    // 1. STANDBY (0s .. 5s): Parado em READY, motor a combustão desligado, potência zero
-                    phase < 5f -> {
-                        curSpeed = 0f
-                        curRpm = 0
-                        curPowerKw = 0f
-                        curLoad = 0
-                        curThrottle = 0
-                        curFuelFlow = 0f
-                        curInstantKml = 0f
-                    }
-                    // 2. EV (5s .. 11s): Saída 100% elétrica (bateria -> rodas)
-                    phase < 11f -> {
-                        val progress = (phase - 5f) / 6f
-                        curSpeed = 10f + progress * 50f // 10 -> 60
-                        curRpm = 0 // Motor térmico desligado
-                        curPowerKw = 8f + kotlin.math.sin(progress * Math.PI.toFloat()) * 22f // até ~30 kW
-                        curLoad = 18
-                        curThrottle = (progress * 28f).toInt()
-                        curFuelFlow = 0f
-                        curInstantKml = 40f
-                        if (progress > 0.5f) simSoc = (simSoc - 1).coerceAtLeast(25)
-                    }
-                    // 3. HÍBRIDO (11s .. 19s): Aceleração combinada (combustão + bateria -> rodas)
-                    phase < 19f -> {
-                        val progress = (phase - 11f) / 8f
-                        curSpeed = 60f + progress * 100f // 60 -> 160
-                        curRpm = (1800 + progress * 4200).toInt() // 1800 -> 6000
-                        curPowerKw = 15f + kotlin.math.sin(progress * Math.PI.toFloat()) * 40f // até ~55 kW
-                        curLoad = (40 + progress * 55).toInt() // até ~95%
-                        curThrottle = (30 + progress * 65).toInt() // até ~95%
-                        curFuelFlow = 3.2f + progress * 3.4f
-                        curInstantKml = 17.2f
-                        if (progress > 0.5f) simSoc = (simSoc - 2).coerceAtLeast(20)
-                    }
-                    // 4. COMBUSTÃO (19s .. 25s): Cruzeiro constante em rodovia (motor térmico -> rodas)
-                    phase < 25f -> {
-                        val progress = (phase - 19f) / 6f
-                        curSpeed = 150f + kotlin.math.sin(progress * Math.PI.toFloat() * 2f) * 10f // ~150-160
-                        curRpm = 2800 + (kotlin.math.sin(progress * 4f) * 200).toInt()
-                        curPowerKw = 0.6f // Elétrico apenas flutuando em standby
-                        curLoad = 35
-                        curThrottle = 30
-                        curFuelFlow = 4.1f
-                        curInstantKml = 22.0f
-                    }
-                    // 5. CARREGANDO / REGENERAÇÃO (25s .. 32s): Frenagem regenerativa (rodas -> motor/gerador -> bateria)
-                    else -> {
-                        val progress = (phase - 25f) / 7f
-                        curSpeed = (160f - progress * 160f).coerceAtLeast(0f) // 160 -> 0
-                        curRpm = 0 // Injeção cortada
-                        curPowerKw = -18f - kotlin.math.sin(progress * Math.PI.toFloat()) * 30f // até ~-48 kW
-                        curLoad = 0
-                        curThrottle = 0
-                        curFuelFlow = 0f
-                        curInstantKml = 40f
-                        simSoc = (simSoc + 3).coerceAtMost(92)
-                    }
-                }
-
-                val dt = 0.25f
-                simTripKm += (curSpeed * (dt / 3600f))
-                simOdo += (curSpeed * (dt / 3600f))
-
-                _telemetry.update { prev ->
-                    prev.copy(
-                        speed = curSpeed,
-                        rpm = curRpm,
-                        hybridMotorPowerKw = curPowerKw,
-                        hybridBatterySoc = simSoc,
-                        isHybridDetected = true,
-                        engineLoad = curLoad,
-                        throttlePosition = curThrottle,
-                        fuelFlowLitersPerHour = curFuelFlow,
-                        instantConsumption = curInstantKml.coerceIn(4f, 35f),
-                        averageConsumption = 8f + (phase / period) * 18f, // 8 -> 26
-                        rangeKm = 740,
-                        batteryVoltage = 11.8f + (phase / period) * 2.8f, // 11.8 -> 14.6
-                        coolantTemp = (75 + (phase / period * 40)).toInt(), // 75 -> 115
-                        intakeTemp = 27,
-                        ethanolPercentage = (20 + (phase / period * 60)).toInt(), // 20 -> 80
-                        fuelTypeLabel = "Gasolina E27",
-                        odometerKm = simOdo,
-                        tripDistanceKm = simTripKm,
-                        tripDurationSec = prev.tripDurationSec + 1,
-                        tripAvgSpeed = 52.0f,
-                        tripMaxSpeed = curSpeed.coerceAtLeast(prev.tripMaxSpeed),
-                        isConnected = true,
-                        connectionState = ConnectionState.CONNECTED,
-                        isDemoMode = true
-                    )
-                }
-
-                val t = _telemetry.value
-                _history.update { h ->
-                    ChartHistory(
-                        rpm = (h.rpm + t.rpm.toFloat()).takeLast(120),
-                        speed = (h.speed + t.speed).takeLast(120),
-                        load = (h.load + t.engineLoad.toFloat()).takeLast(120),
-                        coolant = (h.coolant + t.coolantTemp.toFloat()).takeLast(120)
-                    )
-                }
-
-                cycleSeconds += 0.25f
-                delay(250)
-            }
-        }
-    }
-
-    private var tripSeconds: Float = 0f
-    private var tripMaxSpeed: Float = 0f
-
-    /** Zera distância, combustível, tempo e velocidade máxima da viagem atual. */
-    fun resetTrip() {
-        accumulatedTripKm = 0f
-        accumulatedFuelLiters = 0f
-        tripSeconds = 0f
-        tripMaxSpeed = 0f
-        _telemetry.update {
-            it.copy(
-                tripDistanceKm = 0f,
-                totalFuelConsumedLiters = 0f,
-                tripDurationSec = 0,
-                tripMaxSpeed = 0f,
-                tripAvgSpeed = 0f,
-                averageConsumption = 0f
-            )
-        }
-        addLog("Viagem reiniciada.")
-    }
-
-    /** Lê VIN, calibração e tipo de combustível (pausa o polling durante a leitura). */
-    fun readVehicleInfo() {
-        if (_vehicleInfoLoading.value) return
-        viewModelScope.launch {
-            if (!obdManager.isConnected()) {
-                addLog("Conecte ao OBD para ler as informações do veículo.")
-                return@launch
-            }
-            _vehicleInfoLoading.value = true
-            pollingJob?.cancel()
-            pollingJob?.join()
-            try {
-                _vehicleInfo.value = obdManager.readVehicleInfo()
-            } catch (e: Exception) {
-                addLog("Erro ao ler informações do veículo: ${e.message}")
-            } finally {
-                _vehicleInfoLoading.value = false
-                if (obdManager.isConnected()) startPidPolling()
-            }
-        }
-    }
-
-    private val _hybridScanReport = MutableStateFlow<List<String>>(emptyList())
-    val hybridScanReport: StateFlow<List<String>> = _hybridScanReport.asStateFlow()
-
-    private val _hybridScanRunning = MutableStateFlow(false)
-    val hybridScanRunning: StateFlow<Boolean> = _hybridScanRunning.asStateFlow()
-
-    /** Varredura somente-leitura do sistema híbrido. Pausa o polling enquanto roda (o barramento é compartilhado). */
-    fun runHybridScan() {
-        if (_hybridScanRunning.value) return
-        viewModelScope.launch {
-            if (!obdManager.isConnected()) {
-                _hybridScanReport.value = listOf("Conecte ao adaptador OBD primeiro (carro ligado em READY).")
-                return@launch
-            }
-            _hybridScanRunning.value = true
-            _hybridScanReport.value = emptyList()
-            pollingJob?.cancel()
-            pollingJob?.join()
-            try {
-                obdManager.probeHybrid { line -> _hybridScanReport.update { it + line } }
-            } catch (e: Exception) {
-                _hybridScanReport.update { it + "Erro na varredura: ${e.message}" }
-            } finally {
-                _hybridScanRunning.value = false
-                if (obdManager.isConnected()) startPidPolling()
-            }
-        }
-    }
-
-    private var pollingJob: Job? = null
-    private var lastPollTimestampMs: Long = 0L
-    private var accumulatedTripKm: Float = 0f
-    private var accumulatedFuelLiters: Float = 0f
+    /** Real (adaptador OBD) ou simulado (modo demo). */
+    val diagnostics: StateFlow<DiagnosticsState> = combine(
+        _isDemoMode, obdManager.diagnostics, _demoDiagnostics
+    ) { demo, real, fake ->
+        if (demo) fake.copy(isDemo = true) else real
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, DiagnosticsState())
 
     init {
-        TelemetryBridge.registerCallbacks(
-            onConnect = { connectObd() },
-            onDisconnect = { disconnectObd() },
-            onToggleDemo = { toggleDemoMode() },
-            onClearDtc = { clearDtcCodes() },
-            onRefreshDiagnostics = { refreshDiagnostics() },
-            onResetTrip = { resetTrip() },
-            onSelectVehicle = { v -> selectVehicle(v) },
-            onTogglePowerInvert = { toggleInvertHybridPowerSign() },
-            onSelectBtDevice = { addr -> selectBtDevice(addr) },
-            onRefreshBtDevices = { refreshBtDevices() },
-            onRunHybridScan = { runHybridScan() },
-            onReadVehicleInfo = { readVehicleInfo() }
-        )
-        TelemetryBridge.updatePowerInverted(_isHybridPowerInverted.value)
-
+        // Limpa o "conectando" quando a conexão sai desse estado (conectou ou falhou)
         viewModelScope.launch {
-            _telemetry.collect { state ->
-                TelemetryBridge.update(state)
-                TelemetryBridge.updateAlerts(com.example.model.AlertEvaluator.evaluate(state))
+            obdManager.connectionState.collect { state ->
+                if (state != ObdConnectionState.CONNECTING) _connectingAddress.value = null
             }
         }
-        viewModelScope.launch {
-            _selectedVehicle.collect { v ->
-                TelemetryBridge.updateVehicles(_vehicles.value, v)
-            }
-        }
-        viewModelScope.launch {
-            _vehicles.collect { list ->
-                TelemetryBridge.updateVehicles(list, _selectedVehicle.value)
-            }
-        }
-        viewModelScope.launch {
-            _isHybridPowerInverted.collect { inv ->
-                TelemetryBridge.updatePowerInverted(inv)
-            }
-        }
-        viewModelScope.launch {
-            _diagnosticCodes.collect { codes ->
-                TelemetryBridge.updateDiagnostics(codes, _readinessMonitors.value)
-            }
-        }
-        viewModelScope.launch {
-            _readinessMonitors.collect { monitors ->
-                TelemetryBridge.updateDiagnostics(_diagnosticCodes.value, monitors)
-            }
-        }
-        viewModelScope.launch {
-            _trips.collect { trips ->
-                TelemetryBridge.updateTrips(trips)
-            }
-        }
-        viewModelScope.launch {
-            _ethanolHistory.collect { history ->
-                TelemetryBridge.updateEthanolHistory(history)
-            }
-        }
-        viewModelScope.launch {
-            _btDevices.collect { devs ->
-                TelemetryBridge.updateBluetooth(devs, _selectedBtAddress.value)
-            }
-        }
-        viewModelScope.launch {
-            _selectedBtAddress.collect { addr ->
-                TelemetryBridge.updateBluetooth(_btDevices.value, addr)
-            }
-        }
-        viewModelScope.launch {
-            _vehicleInfo.collect { info ->
-                TelemetryBridge.updateVehicleInfo(info, _vehicleInfoLoading.value)
-            }
-        }
-        viewModelScope.launch {
-            _vehicleInfoLoading.collect { loading ->
-                TelemetryBridge.updateVehicleInfo(_vehicleInfo.value, loading)
-            }
-        }
-        viewModelScope.launch {
-            _hybridScanReport.collect { report ->
-                TelemetryBridge.updateHybridScan(report, _hybridScanRunning.value)
-            }
-        }
-        viewModelScope.launch {
-            _hybridScanRunning.collect { running ->
-                TelemetryBridge.updateHybridScan(_hybridScanReport.value, running)
-            }
-        }
-        // Carrega lista de dispositivos ao iniciar
-        refreshBtDevices()
+        applyGaugePriority()
+        refreshDevices()
+        startTelemetrySource()
+        autoConnectLastDevice()
     }
 
-    /**
-     * A lista salva no aparelho ("custom_vehicles_json") tem prioridade sobre os perfis de fábrica,
-     * então perfis novos nunca apareciam para quem já abriu o app. Aqui, perfis de fábrica ainda
-     * não "semeados" (ids em seeded_vehicle_ids) são acrescentados uma única vez — sem recriar
-     * os que o usuário excluiu depois.
-     */
-    private fun loadVehicles(): List<VehicleProfile> {
-        val seeded = prefs.getStringSet("seeded_vehicle_ids", emptySet()) ?: emptySet()
-        val raw = prefs.getString("custom_vehicles_json", null)
-        var list: MutableList<VehicleProfile>? = null
-        if (!raw.isNullOrBlank()) {
-            try {
-                val array = JSONArray(raw)
-                val parsed = mutableListOf<VehicleProfile>()
-                for (i in 0 until array.length()) {
-                    parsed.add(vehicleProfileFromJson(array.getJSONObject(i)))
-                }
-                if (parsed.isNotEmpty()) list = parsed
-            } catch (_: Exception) {}
-        }
-        if (list == null) {
-            // Primeira execução (ou lista inválida): tudo de fábrica já conta como semeado.
-            prefs.edit().putStringSet("seeded_vehicle_ids", PreloadedVehicles.all.map { it.id }.toSet()).apply()
-            return PreloadedVehicles.all
-        }
-        val current: MutableList<VehicleProfile> = list
-        // Instalações antigas ainda não tinham o controle de semeadura: os 3 perfis originais já foram vistos.
-        val alreadySeen = if (seeded.isEmpty()) {
-            setOf("corolla_altis_2025", "corolla_hybrid_2025", "yaris_xl_plus_2025")
-        } else seeded
-        val missing = PreloadedVehicles.all.filter { it.id !in alreadySeen && current.none { v -> v.id == it.id } }
-        if (missing.isNotEmpty()) {
-            current.addAll(0, missing)
-            val array = JSONArray()
-            current.forEach { array.put(it.toJsonObject()) }
-            prefs.edit()
-                .putString("custom_vehicles_json", array.toString())
-                .putStringSet("seeded_vehicle_ids", PreloadedVehicles.all.map { it.id }.toSet())
-                .apply()
-        } else if (seeded.isEmpty()) {
-            prefs.edit().putStringSet("seeded_vehicle_ids", PreloadedVehicles.all.map { it.id }.toSet()).apply()
-        }
-        return current
+    fun setGaugeSlot(index: Int, sensorId: String) {
+        if (index !in 0 until GaugeCatalog.SLOT_COUNT || sensorId !in GaugeCatalog.byId) return
+        val updated = _gaugeSlots.value.toMutableList()
+        updated[index] = sensorId
+        saveGaugeSlots(updated)
     }
 
-    private fun loadInitialSelectedVehicle(): VehicleProfile {
-        val list = loadVehicles()
-        var selectedId = prefs.getString("selected_vehicle_id", null)
-        // Seleciona o Corolla GLi Hybrid 2026 uma vez (o carro do usuário).
-        if (!prefs.getBoolean("gli_hybrid_2026_selected_once", false)) {
-            list.firstOrNull { it.id == PreloadedVehicles.corollaGliHybrid2026.id }?.let {
-                selectedId = it.id
-                prefs.edit().putString("selected_vehicle_id", it.id).putBoolean("gli_hybrid_2026_selected_once", true).apply()
-            }
-        }
-        return list.firstOrNull { it.id == selectedId } ?: list.firstOrNull() ?: PreloadedVehicles.corollaGliHybrid2026
+    fun resetGaugeSlots() {
+        saveGaugeSlots(GaugeCatalog.DEFAULT_SLOTS)
     }
 
-    private fun persistVehicles(list: List<VehicleProfile>, selectedId: String?) {
-        val array = JSONArray()
-        list.forEach { array.put(it.toJsonObject()) }
-        prefs.edit()
-            .putString("custom_vehicles_json", array.toString())
-            .putString("selected_vehicle_id", selectedId ?: _selectedVehicle.value.id)
-            .apply()
+    private fun loadGaugeSlots(): List<String> =
+        GaugeCatalog.sanitize(prefs.getString(KEY_GAUGE_SLOTS, null)?.split(","))
+
+    private fun saveGaugeSlots(slots: List<String>) {
+        _gaugeSlots.value = slots
+        prefs.edit().putString(KEY_GAUGE_SLOTS, slots.joinToString(",")).apply()
+        applyGaugePriority()
     }
 
-    fun selectVehicle(vehicle: VehicleProfile) {
-        _selectedVehicle.value = vehicle
-        prefs.edit().putString("selected_vehicle_id", vehicle.id).apply()
-        addLog("Veículo selecionado: ${vehicle.fullName}")
+    /** Sensores adicionais que estão em algum manômetro passam a ser lidos com prioridade. */
+    private fun applyGaugePriority() {
+        val pids = _gaugeSlots.value
+            .flatMap { GaugeCatalog.byId[it]?.pids ?: emptySet() }
+            .toSet()
+        obdManager.setPriorityPids(pids)
     }
 
-    fun saveVehicle(profile: VehicleProfile) {
-        val current = _vehicles.value.toMutableList()
-        val index = current.indexOfFirst { it.id == profile.id }
-        if (index >= 0) {
-            current[index] = profile
-            addLog("Perfil de veículo atualizado: ${profile.fullName}")
+    fun selectScreen(screen: AppScreen) {
+        _currentScreen.value = screen
+    }
+
+    fun selectProfile(profile: VehicleProfile) {
+        _selectedProfile.value = profile
+        prefs.edit().putString(KEY_PROFILE_ID, profile.id).apply()
+        // Conexão OBD ativa: atualiza o perfil sem reconectar. Demo: reinicia o simulador.
+        obdManager.updateProfile(profile)
+        if (_isDemoMode.value) {
+            startTelemetrySource()
         } else {
-            current.add(0, profile)
-            addLog("Novo perfil de veículo criado: ${profile.fullName}")
-        }
-        _vehicles.value = current
-        if (_selectedVehicle.value.id == profile.id || current.size == 1) {
-            _selectedVehicle.value = profile
-        }
-        persistVehicles(current, _selectedVehicle.value.id)
-    }
-
-    fun deleteVehicle(vehicleId: String) {
-        val current = _vehicles.value.toMutableList()
-        val removed = current.removeAll { it.id == vehicleId }
-        if (removed) {
-            if (current.isEmpty()) {
-                current.addAll(PreloadedVehicles.all)
-            }
-            _vehicles.value = current
-            if (_selectedVehicle.value.id == vehicleId) {
-                val newSelected = current.first()
-                _selectedVehicle.value = newSelected
-                addLog("Veículo ativo alterado para: ${newSelected.fullName}")
-            }
-            persistVehicles(current, _selectedVehicle.value.id)
-            addLog("Perfil excluído com sucesso.")
+            val cur = _telemetry.value
+            val effectiveTank = if (profile.tankCapacityLiters > 0.0) profile.tankCapacityLiters else 50.0
+            val liters = (effectiveTank * (cur.fuelLevelPercent / 100.0)).toFloat()
+            _telemetry.value = cur.copy(fuelLiters = liters)
         }
     }
 
-    fun resetVehiclesToDefault() {
-        _vehicles.value = PreloadedVehicles.all
-        _selectedVehicle.value = PreloadedVehicles.corollaGliHybrid2026
-        prefs.edit()
-            .remove("custom_vehicles_json")
-            .putStringSet("seeded_vehicle_ids", PreloadedVehicles.all.map { it.id }.toSet())
-            .putString("selected_vehicle_id", PreloadedVehicles.corollaGliHybrid2026.id)
-            .apply()
-        addLog("Perfis restaurados para os padrões originais de fábrica.")
-    }
-
-    /** Atualiza lista de dispositivos Bluetooth pareados */
-    fun refreshBtDevices() {
-        viewModelScope.launch {
-            _btEnabled.value = obdManager.isBluetoothEnabled()
-            val list = obdManager.listPairedDevices()
-            _btDevices.value = list
-            addLog(
-                if (list.isEmpty()) "Nenhum dispositivo Bluetooth pareado encontrado."
-                else "Encontrados ${list.size} dispositivo(s) pareado(s)."
-            )
-            // Se nenhum selecionado ainda, pré-seleciona o primeiro "provável OBD"
-            if (_selectedBtAddress.value == null) {
-                list.firstOrNull { it.isLikelyObd }?.let {
-                    _selectedBtAddress.value = it.address
-                    addLog("Pré-selecionado: ${it.name} (${it.address})")
-                }
-            }
+    fun updateProfile(updated: VehicleProfile) {
+        val list = _allProfiles.value.toMutableList()
+        val idx = list.indexOfFirst { it.id == updated.id }
+        if (idx >= 0) {
+            list[idx] = updated
+        } else {
+            list.add(updated)
         }
-    }
-
-    fun selectBtDevice(address: String?) {
-        _selectedBtAddress.value = address
-        val name = _btDevices.value.firstOrNull { it.address == address }?.name ?: address
-        addLog(if (address != null) "Dispositivo selecionado: $name" else "Seleção limpa (modo automático)")
-    }
-
-    /**
-     * Conecta usando o dispositivo selecionado, ou tenta automático se nenhum estiver selecionado.
-     */
-    fun connectObd() {
-        viewModelScope.launch {
-            demoJob?.cancel()
-            pollingJob?.cancel()
-            _telemetry.update {
-                it.copy(
-                    connectionState = ConnectionState.SEARCHING,
-                    isConnected = false,
-                    isDemoMode = false
-                )
-            }
-
-            val selected = _selectedBtAddress.value
-            if (selected != null) {
-                addLog("Iniciando conexão no dispositivo selecionado...")
+        _allProfiles.value = list
+        if (_selectedProfile.value.id == updated.id) {
+            _selectedProfile.value = updated
+            obdManager.updateProfile(updated)
+            if (_isDemoMode.value) {
+                startTelemetrySource()
             } else {
-                addLog("Iniciando conexão OBD-2 (automático: Bluetooth → Wi-Fi)...")
+                val cur = _telemetry.value
+                val effectiveTank = if (updated.tankCapacityLiters > 0.0) updated.tankCapacityLiters else 50.0
+                val liters = (effectiveTank * (cur.fuelLevelPercent / 100.0)).toFloat()
+                _telemetry.value = cur.copy(fuelLiters = liters)
             }
+        }
+        saveCustomProfiles()
+    }
 
-            _telemetry.update { it.copy(connectionState = ConnectionState.CONNECTING) }
-
-            val success = if (selected != null) {
-                obdManager.connectBluetoothToAddress(selected) { logMsg -> addLog(logMsg) }
-            } else {
-                obdManager.connectAuto { logMsg -> addLog(logMsg) }
-            }
-
-            if (success) {
-                _telemetry.update {
-                    it.copy(
-                        connectionState = ConnectionState.CONNECTED,
-                        isConnected = true,
-                        isDemoMode = false
-                    )
+    private fun loadInitialProfiles(): List<VehicleProfile> {
+        val baseProfiles = VehicleProfiles.DEFAULT_PROFILES.toMutableList()
+        val customJson = prefs.getString(KEY_CUSTOM_PROFILES, null) ?: return baseProfiles
+        return try {
+            val array = JSONArray(customJson)
+            for (i in 0 until array.length()) {
+                val p = vehicleProfileFromJson(array.getJSONObject(i))
+                val idx = baseProfiles.indexOfFirst { it.id == p.id }
+                if (idx >= 0) {
+                    baseProfiles[idx] = p
+                } else {
+                    baseProfiles.add(p)
                 }
-                com.example.service.ObdForegroundService.start(getApplication())
-                addLog("OBD-2 online. Detectando PIDs suportados...")
-                obdManager.probeSupportedPids { msg -> addLog(msg) }
-                addLog("Iniciando telemetria real.")
-                startPidPolling()
-                refreshDiagnostics()
-            } else {
-                _telemetry.update {
-                    it.copy(
-                        connectionState = ConnectionState.ERROR,
-                        isConnected = false,
-                        isDemoMode = false
-                    )
-                }
-                addLog("Falha na conexão. Verifique se o adaptador está ligado, pareado e selecionado.")
             }
+            baseProfiles
+        } catch (_: Exception) {
+            baseProfiles
         }
     }
 
-    fun disconnectObd() {
-        demoJob?.cancel()
-        pollingJob?.cancel()
-        obdManager.disconnect()
-        stopGpsSpeed()
-        com.example.service.ObdForegroundService.stop(getApplication())
-        _telemetry.update {
-            TelemetryState(
-                connectionState = ConnectionState.DISCONNECTED,
-                isConnected = false,
-                isDemoMode = false
-            )
-        }
-        addLog("Desconectado do adaptador OBD-2.")
-    }
-
-    fun clearDtcCodes() {
-        viewModelScope.launch {
-            if (!obdManager.isConnected()) {
-                addLog("Não conectado. Impossível limpar códigos.")
-                return@launch
-            }
-            addLog("Enviando comando Mode 04 (Clear DTCs)...")
-            val ok = obdManager.clearDtcs()
-            if (ok) {
-                _diagnosticCodes.value = emptyList()
-                addLog("Códigos DTC apagados da ECU com sucesso.")
-                val readiness = obdManager.readReadiness()
-                if (readiness.isNotEmpty()) {
-                    _readinessMonitors.value = readiness
-                }
-            } else {
-                addLog("Falha ao limpar códigos. Verifique a conexão.")
-            }
-        }
-    }
-
-    fun refreshDiagnostics() {
-        viewModelScope.launch {
-            if (!obdManager.isConnected()) return@launch
-            addLog("Lendo códigos de falha (Mode 03)...")
-            val result = obdManager.readDtcs()
-            val mapped = result.codes.map { code ->
-                DiagnosticCode(
-                    code = code,
-                    title = dtcTitle(code),
-                    description = dtcDescription(code),
-                    system = dtcSystem(code),
-                    severity = dtcSeverity(code)
-                )
-            }
-            _diagnosticCodes.value = mapped
-            addLog(
-                if (mapped.isEmpty()) "Nenhum código de falha encontrado."
-                else "${mapped.size} código(s) encontrado(s). MIL=${if (result.milOn) "ON" else "OFF"}"
-            )
-
-            val readiness = obdManager.readReadiness()
-            if (readiness.isNotEmpty()) {
-                _readinessMonitors.update { it + readiness }
-            }
-        }
-    }
-
-    private fun startPidPolling() {
-        pollingJob?.cancel()
-        lastPollTimestampMs = System.currentTimeMillis()
-        pollingJob = viewModelScope.launch {
-            while (isActive && obdManager.isConnected()) {
-                try {
-                    val isHybridVehicle = _selectedVehicle.value.isHybrid
-                    val pids = obdManager.readMainPids(queryHybrid = isHybridVehicle)
-
-                    val now = System.currentTimeMillis()
-                    val dtSeconds = if (lastPollTimestampMs > 0L) {
-                        ((now - lastPollTimestampMs) / 1000f).coerceIn(0.1f, 5.0f)
-                    } else 0.7f
-                    lastPollTimestampMs = now
-                    tripSeconds += dtSeconds
-                    (pids.speed ?: 0f).let { if (it > tripMaxSpeed) tripMaxSpeed = it }
-
-                    _telemetry.update { current ->
-                        val curRpm = pids.rpm ?: current.rpm
-                        val curSpeed = pids.speed ?: current.speed
-                        val curEthanol = pids.ethanolPercentage ?: current.ethanolPercentage
-
-                        // 1. Integração real de Odômetro e Distância da Viagem
-                        val deltaDistanceKm = if (curSpeed > 0f) {
-                            (curSpeed * (dtSeconds / 3600f))
-                        } else 0f
-                        accumulatedTripKm += deltaDistanceKm
-
-                        val effectiveOdometerKm = if (pids.odometerKm != null && pids.odometerKm > 0f) {
-                            pids.odometerKm
-                        } else {
-                            accumulatedTripKm
-                        }
-
-                        // 2. Cálculo de Consumo (prioriza PID 5E da ECU, depois MAF, depois Speed-Density)
-                        val vehicle = _selectedVehicle.value
-                        val isDiesel = vehicle.fuelType.contains("diesel", ignoreCase = true) ||
-                                       vehicle.fuelType.contains("diesel", ignoreCase = true)
-                        val isFlex = vehicle.fuelType.contains("flex", ignoreCase = true) ||
-                                     vehicle.fuelType.contains("etanol", ignoreCase = true)
-
-                        // AFR e densidade adaptados ao perfil
-                        val (baseAfr, baseDensity) = when {
-                            isDiesel -> 14.5f to 835f
-                            isFlex -> {
-                                val r = (curEthanol / 100f).coerceIn(0f, 1f)
-                                (14.7f * (1f - r) + 9.0f * r) to (745f * (1f - r) + 789f * r)
-                            }
-                            else -> 14.7f to 745f // gasolina
-                        }
-
-                        val fuelFlowLph = when {
-                            // 1. Melhor: taxa de combustível direto da ECU (PID 015E)
-                            pids.fuelRateLph != null && pids.fuelRateLph > 0f -> pids.fuelRateLph
-                            // 2. MAF disponível
-                            pids.maf != null && pids.maf > 0f && curRpm > 250 -> {
-                                ((pids.maf / (baseAfr * baseDensity)) * 3600f).coerceIn(0.2f, 45f)
-                            }
-                            // 3. Speed-Density (usa cilindrada do perfil)
-                            curRpm > 250 -> {
-                                val displacementL = vehicle.getDisplacementLiters()
-                                val curMap = pids.manifoldPressure ?: current.manifoldPressure.coerceAtLeast(30f)
-                                val curIat = pids.intakeTemp ?: current.intakeTemp.coerceAtLeast(15)
-                                val imap = (curRpm * curMap) / (curIat + 273.15f)
-                                val mafGps = (imap / 120f) * 0.82f * displacementL * (28.97f / 8.314f)
-                                ((mafGps / (baseAfr * baseDensity)) * 3600f).coerceIn(0.2f, 45f)
-                            }
-                            else -> 0f
-                        }
-
-                        val deltaFuelLiters = fuelFlowLph * (dtSeconds / 3600f)
-                        accumulatedFuelLiters += deltaFuelLiters
-
-                        // Consumo Instantâneo (km/L)
-                        val instantKml = if (curSpeed > 2f && fuelFlowLph > 0.1f) {
-                            (curSpeed / fuelFlowLph).coerceIn(0f, 40f)
-                        } else 0f
-
-                        // Consumo Médio (km/L) acumulado
-                        val avgKml = if (accumulatedTripKm > 0.05f && accumulatedFuelLiters > 0.005f) {
-                            (accumulatedTripKm / accumulatedFuelLiters).coerceIn(2f, 35f)
-                        } else if (instantKml > 0f) {
-                            instantKml
-                        } else {
-                            current.averageConsumption
-                        }
-
-                        // 3. Autonomia real (Range em KM)
-                        val tankCap = _selectedVehicle.value.getTankCapacityLiters()
-                        val fuelLevelPct = pids.fuelLevelPercent ?: current.fuelLevelPercent
-                        val litersRemaining = if (fuelLevelPct != null) {
-                            (tankCap * (fuelLevelPct / 100f)).coerceAtLeast(1f)
-                        } else {
-                            (tankCap * 0.70f - accumulatedFuelLiters).coerceAtLeast(2f)
-                        }
-                        val effAvg = if (avgKml > 3f) avgKml else if (instantKml > 3f) instantKml else 12.0f
-                        val calculatedRange = (litersRemaining * effAvg).toInt().coerceIn(10, 1200)
-
-                        current.copy(
-                            rpm = curRpm,
-                            speed = curSpeed,
-                            coolantTemp = pids.coolantTemp ?: current.coolantTemp,
-                            intakeTemp = pids.intakeTemp ?: current.intakeTemp,
-                            engineLoad = pids.engineLoad ?: current.engineLoad,
-                            manifoldPressure = pids.manifoldPressure ?: current.manifoldPressure,
-                            throttlePosition = pids.throttlePosition ?: current.throttlePosition,
-                            batteryVoltage = pids.batteryVoltage ?: current.batteryVoltage,
-                            ethanolPercentage = curEthanol,
-                            fuelPressure = pids.fuelPressure ?: current.fuelPressure,
-                            fuelTypeLabel = if (curEthanol > 0) "${fuelBlendLabel(curEthanol)} • E$curEthanol" else current.fuelTypeLabel,
-                            odometerKm = effectiveOdometerKm,
-                            tripDistanceKm = accumulatedTripKm,
-                            fuelFlowLitersPerHour = fuelFlowLph,
-                            totalFuelConsumedLiters = accumulatedFuelLiters,
-                            instantConsumption = instantKml,
-                            averageConsumption = avgKml,
-                            rangeKm = calculatedRange,
-                            fuelLevelPercent = fuelLevelPct,
-                            hybridBatterySoc = pids.hybridBatterySoc ?: current.hybridBatterySoc,
-                            hybridMotorPowerKw = pids.hybridMotorPowerKw ?: current.hybridMotorPowerKw,
-                            isHybridDetected = pids.isHybridDetected || current.isHybridDetected,
-                            oilTemp = pids.oilTemp ?: current.oilTemp,
-                            ambientTemp = pids.ambientTemp ?: current.ambientTemp,
-                            catalystTemp = pids.catalystTemp ?: current.catalystTemp,
-                            tripDurationSec = tripSeconds.toInt(),
-                            tripMaxSpeed = tripMaxSpeed,
-                            tripAvgSpeed = if (tripSeconds > 5f) accumulatedTripKm / (tripSeconds / 3600f) else 0f,
-                            hybridExtras = if (pids.hybridExtras.isNotEmpty()) current.hybridExtras + pids.hybridExtras else current.hybridExtras,
-                            isConnected = true,
-                            connectionState = ConnectionState.CONNECTED,
-                            isDemoMode = false
-                        )
-                    }
-                    val t = _telemetry.value
-                    _history.update { h ->
-                        ChartHistory(
-                            rpm = (h.rpm + t.rpm.toFloat()).takeLast(120),
-                            speed = (h.speed + t.speed).takeLast(120),
-                            load = (h.load + t.engineLoad.toFloat()).takeLast(120),
-                            coolant = (h.coolant + t.coolantTemp.toFloat()).takeLast(120)
-                        )
-                    }
-                } catch (e: Exception) {
-                    addLog("Erro na leitura de PIDs: ${e.message}")
-                    if (!obdManager.isConnected()) {
-                        _telemetry.update {
-                            it.copy(
-                                connectionState = ConnectionState.ERROR,
-                                isConnected = false
-                            )
-                        }
-                        addLog("Conexão perdida durante a leitura.")
-                        break
-                    }
-                }
-                delay(650)
-            }
-        }
-    }
-
-    private fun addLog(message: String) {
-        _connectionLogs.update { (listOf(message) + it).take(80) }
-    }
-
-    private fun dtcTitle(code: String): String = DtcLibrary.lookup(code).title
-
-    private fun dtcDescription(code: String): String {
-        val info = DtcLibrary.lookup(code)
-        val parts = mutableListOf(info.description)
-        if (info.possibleCauses.isNotBlank()) parts.add("Possíveis causas: ${info.possibleCauses}")
-        if (info.recommendation.isNotBlank()) parts.add("Recomendação: ${info.recommendation}")
-        return parts.joinToString(" ")
-    }
-
-    private fun dtcSystem(code: String): String = DtcLibrary.lookup(code).system
-
-    private fun dtcSeverity(code: String): DTCLevel = DtcLibrary.lookup(code).severity
-
-
-    private var locationManager: LocationManager? = null
-    private val gpsListener = object : LocationListener {
-        override fun onLocationChanged(loc: Location) {
-            val kmh = (loc.speed * 3.6f).coerceAtLeast(0f)
-            _telemetry.update { it.copy(gpsSpeed = kmh) }
-        }
-        override fun onProviderEnabled(provider: String) {}
-        override fun onProviderDisabled(provider: String) {}
-    }
-
-    fun startGpsSpeed() {
+    private fun saveCustomProfiles() {
         try {
-            val ctx = getApplication<Application>()
-            locationManager = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gpsListener)
+            val array = JSONArray()
+            for (p in _allProfiles.value) {
+                val original = VehicleProfiles.DEFAULT_PROFILES.firstOrNull { it.id == p.id }
+                if (original == null || original != p) {
+                    array.put(p.toJsonObject())
+                }
+            }
+            prefs.edit().putString(KEY_CUSTOM_PROFILES, array.toString()).apply()
         } catch (_: Exception) {}
     }
 
-    fun stopGpsSpeed() {
-        try { locationManager?.removeUpdates(gpsListener) } catch (_: Exception) {}
+    fun setDemoMode(enabled: Boolean) {
+        _isDemoMode.value = enabled
+        _liveDataReceived.value = false
+        _connectingAddress.value = null
+        if (enabled) {
+            _demoDiagnostics.value = demoDiagnosticsSample()
+            obdManager.disconnect()
+            startTelemetrySource()
+        } else {
+            // Saiu do demo: para o simulador e zera os valores falsos até conectar ao adaptador
+            obdSimulator.stop()
+            _telemetry.value = blankTelemetryData()
+            autoConnectLastDevice()
+        }
+    }
+
+    fun refreshDevices() {
+        _pairedDevices.value = obdManager.getPairedDevices()
+    }
+
+    fun connectDevice(device: BluetoothDeviceItem) {
+        _isDemoMode.value = false
+        obdSimulator.stop()
+        prefs.edit().putString(KEY_LAST_DEVICE, device.address).apply()
+        _liveDataReceived.value = false
+        _connectingAddress.value = device.address
+        obdManager.connectToDevice(
+            deviceItem = device,
+            scope = viewModelScope,
+            profile = _selectedProfile.value
+        ) { incoming ->
+            _liveDataReceived.value = true
+            // O modo (ECO/NORMAL/SPORT) vem sempre da leitura da ECU; o usuário não escolhe.
+            // A força G vem do acelerômetro do celular, não do OBD: preserva o valor atual
+            _telemetry.value = incoming.copy(
+                lateralGForce = _telemetry.value.lateralGForce
+            )
+        }
+    }
+
+    /** Chamado quando o usuário concede a permissão de Bluetooth (Android 12+). */
+    fun onBluetoothPermissionGranted() {
+        refreshDevices()
+        autoConnectLastDevice()
+    }
+
+    /** Reconecta sozinho ao último adaptador OBD usado (se estiver pareado e o app não estiver em demo). */
+    fun autoConnectLastDevice() {
+        if (_isDemoMode.value) return
+        if (obdManager.connectionState.value != ObdConnectionState.DISCONNECTED) return
+        if (!hasBluetoothPermission()) return
+        val lastAddress = prefs.getString(KEY_LAST_DEVICE, null) ?: return
+        val device = obdManager.getPairedDevices().firstOrNull { it.address == lastAddress } ?: return
+        connectDevice(device)
+    }
+
+    private fun hasBluetoothPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(
+                getApplication<Application>(), Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+
+    fun scanDtcs() {
+        if (_isDemoMode.value) {
+            viewModelScope.launch {
+                _demoDiagnostics.update { it.copy(isScanning = true, message = null) }
+                delay(900)
+                _demoDiagnostics.update { it.copy(isScanning = false, lastScanMs = System.currentTimeMillis()) }
+            }
+        } else {
+            obdManager.requestScan()
+        }
+    }
+
+    fun clearDtcs() {
+        if (_isDemoMode.value) {
+            viewModelScope.launch {
+                _demoDiagnostics.update { it.copy(isScanning = true, message = null) }
+                delay(900)
+                _demoDiagnostics.value = DiagnosticsState(
+                    milOn = false, reportedCount = 0, lastScanMs = System.currentTimeMillis(),
+                    message = "Códigos apagados (demonstração).", isDemo = true
+                )
+            }
+        } else {
+            obdManager.requestClear()
+        }
+    }
+
+    fun disconnectDevice() {
+        _connectingAddress.value = null
+        _liveDataReceived.value = false
+        obdManager.disconnect()
+    }
+
+    private fun startTelemetrySource() {
+        if (_isDemoMode.value) {
+            obdSimulator.start(viewModelScope, _selectedProfile.value) { incoming ->
+                _telemetry.value = incoming
+            }
+        }
+    }
+
+    fun updateAccelerometer(x: Float) {
+        // Accelerometer X axis on phone in portrait gives lateral G
+        // 9.81 m/s^2 = 1.0 G
+        if (!_isDemoMode.value) {
+            val gForce = (-x / 9.81f).coerceIn(-1.5f, 1.5f)
+            _telemetry.value = _telemetry.value.copy(lateralGForce = gForce)
+        }
     }
 
     override fun onCleared() {
         super.onCleared()
-        demoJob?.cancel()
-        pollingJob?.cancel()
+        obdSimulator.stop()
         obdManager.disconnect()
-        stopGpsSpeed()
-        com.example.service.ObdForegroundService.stop(getApplication())
     }
 }
+
+private fun demoDiagnosticsSample() = DiagnosticsState(
+    milOn = true,
+    reportedCount = 1,
+    stored = listOf(dtcEntryOf("P0420", DtcKind.STORED)),
+    pending = listOf(dtcEntryOf("P0171", DtcKind.PENDING)),
+    lastScanMs = System.currentTimeMillis(),
+    isDemo = true
+)
+
+private const val PREFS_NAME = "cibaauto_prefs"
+private const val KEY_PROFILE_ID = "selected_profile_id"
+private const val KEY_LAST_DEVICE = "last_obd_device"
+private const val KEY_GAUGE_SLOTS = "gauge_slots"
+private const val KEY_CUSTOM_PROFILES = "custom_edited_profiles"
+
+/** Telemetria zerada: usada ao abrir o app e ao sair do modo demonstração (nunca mostra valores falsos). */
+private fun blankTelemetryData() = TelemetryData(
+    speedKmh = 0f, avgSpeedKmh = 0f, rpm = 0f, fuelLevelPercent = 0f,
+    batteryVoltage = 0f, coolantTempC = Float.NaN, oilTempC = Float.NaN,
+    turboPressureKpa = 0f, engineLoadPercent = 0f, throttlePercent = 0f,
+    instantConsumptionKmPerL = 0f, avgConsumptionKmPerL = 0f, autonomyKm = 0,
+    elapsedTimeSeconds = 0L, isEngineRunning = false, isEvMode = false,
+    ethanolPercent = Float.NaN, hybridBatterySocPercent = 0f,
+    hybridSocAvailable = false, hybridDetailAvailable = false,
+    hybridBatteryVoltageVolts = 0f, hybridBatteryCurrentAmps = 0f,
+    hybridBatteryTempC = 0f, icePowerKw = 0f, electricMotorPowerKw = 0f,
+    generatorPowerKw = 0f,
+    ecuLinkOk = false, fuelLevelAvailable = false
+)

@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "CIBA AUTO"
+rootProject.name = "CibaAuto"
 
 include(":app")

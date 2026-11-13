@@ -1,6 +1,6 @@
 {
-  "name": "CIBA AUTO",
-  "description": "Futuristic OBD2 Vehicle Diagnostics and Telemetry Cockpit",
+  "name": "CibaAuto",
+  "description": "Painel automotivo OBD-II com telemetria em tempo real para Android e Android Auto",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

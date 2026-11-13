@@ -1,3 +1,22 @@
 <resources>
-    <string name="app_name">CIBA AUTO</string>
+    <string name="app_name">CibaAuto</string>
+    <string name="driving_data">Dados de Direção</string>
+    <string name="speedometer">Velocímetro</string>
+    <string name="tachometer">Tacômetro</string>
+    <string name="avg_speed">Velocidade média</string>
+    <string name="elapsed_time">Tempo decorrido</string>
+    <string name="fuel">Combustível</string>
+    <string name="fuel_full">Combustível Full</string>
+    <string name="range">Autonomia</string>
+    <string name="drive_mode">Modo de Direção</string>
+    <string name="oil_temp">Óleo de Motor</string>
+    <string name="turbo_pressure">Pressão de Turbo</string>
+    <string name="coolant_temp">Temperatura d\'Água</string>
+    <string name="battery_voltage">Tensão da Bateria</string>
+    <string name="hybrid_soc">SOC Bateria</string>
+    <string name="avg_consumption">Consumo médio</string>
+    <string name="instant_consumption">Consumo instantâneo</string>
+    <string name="lateral_g">G-Force Lateral</string>
+    <string name="dashboard">Dashboard</string>
+    <string name="settings">Configurações</string>
 </resources>

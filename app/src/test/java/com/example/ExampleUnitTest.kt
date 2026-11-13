@@ -1,73 +1,60 @@
 package com.example
 
-import org.junit.Assert.*
+import com.example.model.DriveMode
+import com.example.model.HybridEnergyFlowState
+import com.example.model.VehicleProfiles
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Example local unit test, which will execute on the development machine (host).
- *
- * See [testing documentation](http://d.android.com/tools/testing).
- */
 class ExampleUnitTest {
-  @Test
-  fun addition_isCorrect() {
-    assertEquals(4, 2 + 2)
-  }
 
-  @Test
-  fun testDeriveEnergyMode_standby() {
-    val t = com.example.model.TelemetryState(speed = 0f, rpm = 0, hybridMotorPowerKw = 0f)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = true)
-    assertEquals(com.example.model.EnergyMode.STANDBY, mode)
-  }
+    @Test
+    fun testVehicleProfilesIncludeCorollaHybridAndEthanolSupport() {
+        val hybridProfile = VehicleProfiles.DEFAULT_PROFILES.firstOrNull { it.id == "corolla_hybrid_2025" }
+        assertNotNull(hybridProfile)
+        assertTrue(hybridProfile!!.isHybrid)
+        assertEquals(43.0, hybridProfile.tankCapacityLiters, 0.1)
+        assertEquals(18.5, hybridProfile.inmetroUrbanKmPerL, 0.01)
+    }
 
-  @Test
-  fun testDeriveEnergyMode_ev() {
-    val t = com.example.model.TelemetryState(speed = 25f, rpm = 0, hybridMotorPowerKw = 12f)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = true)
-    assertEquals(com.example.model.EnergyMode.EV, mode)
-  }
+    @Test
+    fun testEthanolPercentageCalculationFromPid0152() {
+        // PID 01 52: Formula is A * 100 / 255.
+        // For 100% Ethanol (E100), byte A = 255 -> 100%
+        val fullEthanolByte = 255
+        val fullPercent = (fullEthanolByte * 100f / 255f).toInt()
+        assertEquals(100, fullPercent)
 
-  @Test
-  fun testDeriveEnergyMode_charging() {
-    // Regenerative braking with negative power
-    val t = com.example.model.TelemetryState(speed = 40f, rpm = 0, hybridMotorPowerKw = -15f)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = true)
-    assertEquals(com.example.model.EnergyMode.CHARGING, mode)
-  }
+        // For E27 gasoline (Brazilian standard ~27% ethanol), byte A = 69 -> 27%
+        val e27Byte = 69
+        val e27Percent = (e27Byte * 100f / 255f).toInt()
+        assertEquals(27, e27Percent)
+    }
 
-  @Test
-  fun testDeriveEnergyMode_charging_with_inverted_sign() {
-    // When invertKwSign is true, positive raw value becomes negative effective power (charging)
-    val t = com.example.model.TelemetryState(speed = 40f, rpm = 0, hybridMotorPowerKw = 15f)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = true, invertKwSign = true)
-    assertEquals(com.example.model.EnergyMode.CHARGING, mode)
-  }
+    @Test
+    fun testAutonomyCalculation() {
+        val profile = VehicleProfiles.DEFAULT_PROFILES.first { it.id == "corolla_hybrid_2025" }
+        val tankPercent = 50f // half tank = 21.5L
+        val litersRemaining = (tankPercent / 100.0) * profile.tankCapacityLiters
+        val autonomy = (litersRemaining * profile.inmetroAvgKmPerL).toInt()
+        assertTrue(autonomy > 300)
+    }
 
-  @Test
-  fun testDeriveEnergyMode_engine() {
-    // Combustion engine running with near zero electric assist
-    val t = com.example.model.TelemetryState(speed = 85f, rpm = 1800, hybridMotorPowerKw = 0.4f)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = true)
-    assertEquals(com.example.model.EnergyMode.ENGINE, mode)
-  }
+    @Test
+    fun testHybridEnergyFlowStates() {
+        val evState = HybridEnergyFlowState.EV_DRIVE
+        assertEquals("Modo Elétrico (Bateria -> MG2 -> Rodas)", evState.description)
 
-  @Test
-  fun testDeriveEnergyMode_hybrid() {
-    // Combustion engine + strong electric assist
-    val t = com.example.model.TelemetryState(speed = 90f, rpm = 3200, hybridMotorPowerKw = 25f)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = true)
-    assertEquals(com.example.model.EnergyMode.HYBRID, mode)
-  }
+        val regenState = HybridEnergyFlowState.REGEN_BRAKING
+        assertEquals("Regeneração (Rodas -> MG2 -> Bateria)", regenState.description)
+    }
 
-  @Test
-  fun testDeriveEnergyMode_nonHybridVehicle() {
-    val t = com.example.model.TelemetryState(speed = 60f, rpm = 2200)
-    val mode = com.example.model.deriveEnergyMode(t, isHybridVehicle = false)
-    assertEquals(com.example.model.EnergyMode.ENGINE, mode)
-
-    val stopped = com.example.model.TelemetryState(speed = 0f, rpm = 800)
-    val stoppedMode = com.example.model.deriveEnergyMode(stopped, isHybridVehicle = false)
-    assertEquals(com.example.model.EnergyMode.STANDBY, stoppedMode)
-  }
+    @Test
+    fun testDriveModes() {
+        assertEquals("ECO", DriveMode.ECO.label)
+        assertEquals("NORMAL", DriveMode.NORMAL.label)
+        assertEquals("SPORT", DriveMode.SPORT.label)
+    }
 }

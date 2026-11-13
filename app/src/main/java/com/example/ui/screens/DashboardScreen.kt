@@ -1,492 +1,735 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
+import android.content.res.Configuration
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Warning
+import com.example.data.InmetroConsumption
+import com.example.model.DTCLevel
+import com.example.model.DiagnosticsState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.LocalGasStation
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.model.GaugeCatalog
+import com.example.ui.components.ConfigurableGauge
+import com.example.ui.components.GaugePickerDialog
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.model.TelemetryState
+import com.example.model.TelemetryData
 import com.example.model.VehicleProfile
-import com.example.ui.theme.*
+import com.example.ui.components.AnimatedEnergyRoad
+import com.example.ui.components.DigitalFuelGauge
+import com.example.ui.components.MiniGauge
+import com.example.ui.components.MiniGaugeCenterType
+import com.example.ui.components.SpeedometerGauge
+import com.example.ui.components.TachometerGauge
+import com.example.ui.theme.CockpitBlack
+import com.example.ui.theme.GaugeGreen
+import com.example.ui.theme.GaugeRed
+import com.example.ui.theme.GaugeYellow
+import com.example.ui.theme.TextMuted
+import com.example.ui.theme.TextWhite
 
 @Composable
 fun DashboardScreen(
-    vehicle: VehicleProfile,
-    telemetry: TelemetryState,
-    onNavigateToEthanol: () -> Unit,
-    onNavigateToVehicles: () -> Unit,
-    onToggleConnection: () -> Unit,
-    hybridScanReport: List<String> = emptyList(),
-    hybridScanRunning: Boolean = false,
-    onRunHybridScan: () -> Unit = {},
-    vehicleInfo: com.example.obd.ObdManager.VehicleInfo? = null,
-    vehicleInfoLoading: Boolean = false,
-    onReadVehicleInfo: () -> Unit = {},
-    onNavigateToTrip: () -> Unit = {},
-    onNavigateToCharts: () -> Unit = {},
-    onNavigateToSensors: () -> Unit = {},
-    onNavigateToEnergyFlow: () -> Unit = {}
+    telemetry: TelemetryData,
+    profile: VehicleProfile,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+    diagnostics: DiagnosticsState = DiagnosticsState(),
+    onOpenDiagnostics: () -> Unit = {},
+    gaugeSlots: List<String> = GaugeCatalog.DEFAULT_SLOTS,
+    onGaugeSlotChanged: (Int, String) -> Unit = { _, _ -> },
+    onResetGauges: () -> Unit = {}
 ) {
-  val scrollState = rememberScrollState()
-  var showScanDialog by remember { mutableStateOf(false) }
-  val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    // Posição do manômetro que o usuário tocou (null = lista fechada)
+    var editingSlot by remember { mutableStateOf<Int?>(null) }
 
-  if (showScanDialog) {
-    AlertDialog(
-        onDismissRequest = { showScanDialog = false },
-        title = { Text("Varredura do sistema híbrido") },
-        text = {
-          Column(modifier = Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
-            if (hybridScanRunning) {
-              LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-              Spacer(Modifier.height(8.dp))
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(CockpitBlack)
+    ) {
+        if (isLandscape) {
+            LandscapeDashboardLayout(
+                telemetry = telemetry,
+                profile = profile,
+                onOpenSettings = onOpenSettings,
+                diagnostics = diagnostics,
+                onOpenDiagnostics = onOpenDiagnostics,
+                gaugeSlots = gaugeSlots,
+                onGaugeClick = { editingSlot = it }
+            )
+        } else {
+            PortraitDashboardLayout(
+                telemetry = telemetry,
+                profile = profile,
+                onOpenSettings = onOpenSettings,
+                diagnostics = diagnostics,
+                onOpenDiagnostics = onOpenDiagnostics,
+                gaugeSlots = gaugeSlots,
+                onGaugeClick = { editingSlot = it }
+            )
+        }
+
+        editingSlot?.let { slot ->
+            GaugePickerDialog(
+                currentId = gaugeSlots.getOrNull(slot) ?: GaugeCatalog.DEFAULT_SLOTS[slot],
+                telemetry = telemetry,
+                onSelect = { id ->
+                    onGaugeSlotChanged(slot, id)
+                    editingSlot = null
+                },
+                onReset = {
+                    onResetGauges()
+                    editingSlot = null
+                },
+                onDismiss = { editingSlot = null }
+            )
+        }
+    }
+}
+
+/** Manômetro de uma posição fixa do dashboard; o sensor vem da configuração salva. */
+@Composable
+private fun SlotGauge(
+    slot: Int,
+    gaugeSlots: List<String>,
+    telemetry: TelemetryData,
+    size: androidx.compose.ui.unit.Dp,
+    onGaugeClick: (Int) -> Unit
+) {
+    val sensor = gaugeSlots.getOrNull(slot)?.let { GaugeCatalog.byId[it] }
+        ?: GaugeCatalog.byId.getValue(GaugeCatalog.DEFAULT_SLOTS[slot])
+    ConfigurableGauge(
+        sensor = sensor,
+        telemetry = telemetry,
+        size = size,
+        onClick = { onGaugeClick(slot) },
+        modifier = Modifier.testTag("gauge_slot_$slot")
+    )
+}
+
+@Composable
+private fun PortraitDashboardLayout(
+    telemetry: TelemetryData,
+    profile: VehicleProfile,
+    onOpenSettings: () -> Unit,
+    diagnostics: DiagnosticsState,
+    onOpenDiagnostics: () -> Unit,
+    gaugeSlots: List<String>,
+    onGaugeClick: (Int) -> Unit
+) {
+    val scrollState = rememberScrollState()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .verticalScroll(scrollState),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Top Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag("btn_menu")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Menu,
+                    contentDescription = "Menu",
+                    tint = TextWhite,
+                    modifier = Modifier.size(24.dp)
+                )
             }
-            Text(
-                text = if (hybridScanReport.isEmpty()) "Aguardando..." else hybridScanReport.joinToString("\n"),
-                fontSize = 10.sp,
-                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-            )
-          }
-        },
-        confirmButton = {
-          TextButton(onClick = {
-            clipboard.setText(androidx.compose.ui.text.AnnotatedString(hybridScanReport.joinToString("\n")))
-          }) { Text("Copiar") }
-        },
-        dismissButton = { TextButton(onClick = { showScanDialog = false }) { Text("Fechar") } }
-    )
-  }
 
-  Column(
-      modifier = Modifier
-          .fillMaxSize()
-          .background(CockpitBlack)
-          .verticalScroll(scrollState)
-          .padding(16.dp),
-      verticalArrangement = Arrangement.spacedBy(16.dp)
-  ) {
-    // Branded Header Banner using the uploaded logomark
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = CockpitSurface,
-        border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.4f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-      Row(
-          modifier = Modifier.padding(14.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-      ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-          Image(
-              painter = painterResource(id = R.drawable.ciba_icon),
-              contentDescription = "CIBA AUTO Logo",
-              modifier = Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
-          )
-          Column {
             Text(
-                text = "CIBA AUTO",
-                color = ElectricBlue,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = 1.5.sp
-            )
-            Text(
-                text = vehicle.fullName,
-                color = TextPrimary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
-            )
-          }
-        }
-
-        Surface(
-            onClick = onNavigateToVehicles,
-            shape = RoundedCornerShape(10.dp),
-            color = CockpitSurfaceVariant,
-            border = BorderStroke(1.dp, CockpitCardBorder)
-        ) {
-          Row(
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(4.dp)
-          ) {
-            Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(14.dp))
-            Text(text = "Trocar", color = TextPrimary, fontSize = 11.sp)
-          }
-        }
-      }
-    }
-
-    // Connection & Demo Banner
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = if (telemetry.isConnected) StatusGreen.copy(alpha = 0.15f) else StatusAmber.copy(alpha = 0.15f),
-        border = BorderStroke(1.dp, if (telemetry.isConnected) StatusGreen else StatusAmber)
-    ) {
-      Row(
-          modifier = Modifier.padding(12.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-      ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-          Box(
-              modifier = Modifier
-                  .size(10.dp)
-                  .clip(CircleShape)
-                  .background(if (telemetry.isConnected) StatusGreen else StatusAmber)
-          )
-          Column {
-            Text(
-                text = if (telemetry.isConnected) "OBD-II CONECTADO (ELM327)" else "OBD-II DESCONECTADO",
-                color = if (telemetry.isConnected) StatusGreen else StatusAmber,
+                text = stringResource(R.string.driving_data),
+                fontSize = 17.sp,
                 fontWeight = FontWeight.Bold,
-                fontSize = 13.sp
+                color = TextWhite
             )
-            Text(
-                text = if (telemetry.isConnected) "Telemetria real ativa via Bluetooth" else "Aguardando conexão física com o adaptador",
-                color = TextSecondary,
-                fontSize = 11.sp
+
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag("btn_quick_settings")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = "Configurações",
+                    tint = TextMuted,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        FaultBanner(
+            diagnostics = diagnostics,
+            onClick = onOpenDiagnostics,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+        )
+
+        // 1. Manômetros Superiores Lado a Lado (Conforme solicitado pelo usuário)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Velocímetro (Esquerda)
+            SpeedometerGauge(
+                currentSpeed = telemetry.speedKmh,
+                avgSpeed = telemetry.avgSpeedKmh,
+                maxSpeed = profile.maxSpeed,
+                size = 152.dp,
+                modifier = Modifier.testTag("gauge_speedometer")
             )
-          }
+
+            // Tacômetro (Direita)
+            TachometerGauge(
+                currentRpm = telemetry.rpm,
+                elapsedTimeFormatted = telemetry.formattedElapsedTime,
+                maxRpm = profile.maxRpm,
+                size = 152.dp,
+                modifier = Modifier.testTag("gauge_tachometer")
+            )
         }
 
-        Button(
-            onClick = onToggleConnection,
-            colors = ButtonDefaults.buttonColors(containerColor = if (telemetry.isConnected) StatusRed else ElectricBlue),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-            modifier = Modifier.height(32.dp)
-        ) {
-          Text(
-              text = if (telemetry.isConnected) "Desconectar" else "Conectar",
-              color = CockpitBlack,
-              fontWeight = FontWeight.Bold,
-              fontSize = 11.sp
-          )
-        }
-      }
-    }
+        Spacer(modifier = Modifier.height(2.dp))
 
-    // Main Central Gauges: Speedometer & Tachometer
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-      // Tachometer Card
-      CockpitCard(
-          modifier = Modifier.weight(1f),
-          title = "CONTA-GIROS",
-          icon = Icons.Default.Speed
-      ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-        ) {
-          Text(
-              text = "${telemetry.rpm}",
-              color = ElectricBlue,
-              fontSize = 36.sp,
-              fontWeight = FontWeight.Black
-          )
-          Text(text = "RPM", color = TextSecondary, fontSize = 12.sp, letterSpacing = 1.sp)
-          Spacer(modifier = Modifier.height(8.dp))
-          LinearProgressIndicator(
-              progress = { (telemetry.rpm / 7000f).coerceIn(0f, 1f) },
-              modifier = Modifier
-                  .fillMaxWidth()
-                  .height(6.dp)
-                  .clip(RoundedCornerShape(3.dp)),
-              color = ElectricBlue,
-              trackColor = CockpitSurfaceVariant,
-          )
-        }
-      }
+        // 1b. Consumo médio (sob o velocímetro) e instantâneo (sob o tacômetro), lado a lado
+        ConsumptionRow(
+            telemetry = telemetry,
+            profile = profile,
+            modifier = Modifier.testTag("consumption_row")
+        )
 
-      // Speedometer Card
-      CockpitCard(
-          modifier = Modifier.weight(1f),
-          title = "VELOCIDADE",
-          icon = Icons.Default.Timeline
-      ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-        ) {
-          Text(
-              text = "${telemetry.speed.toInt()}",
-              color = NeonCyan,
-              fontSize = 36.sp,
-              fontWeight = FontWeight.Black
-          )
-          Text(text = "KM/H", color = TextSecondary, fontSize = 12.sp, letterSpacing = 1.sp)
-          Spacer(modifier = Modifier.height(8.dp))
-          LinearProgressIndicator(
-              progress = { (telemetry.speed / 220f).coerceIn(0f, 1f) },
-              modifier = Modifier
-                  .fillMaxWidth()
-                  .height(6.dp)
-                  .clip(RoundedCornerShape(3.dp)),
-              color = NeonCyan,
-              trackColor = CockpitSurfaceVariant,
-          )
-        }
-      }
-    }
+        Spacer(modifier = Modifier.height(4.dp))
 
-    // Ethanol Flex Monitor Highlight Card (Requested specially by user)
-    Surface(
-        onClick = onNavigateToEthanol,
-        shape = RoundedCornerShape(16.dp),
-        color = CockpitSurface,
-        border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.5f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-      Row(
-          modifier = Modifier.padding(16.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-      ) {
+        // 2. Linha Intermediária: Combustível + Autonomia
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-          Box(
-              modifier = Modifier
-                  .size(48.dp)
-                  .clip(CircleShape)
-                  .background(ElectricBlue.copy(alpha = 0.15f)),
-              contentAlignment = Alignment.Center
-          ) {
-            Icon(Icons.Default.LocalGasStation, contentDescription = null, tint = ElectricBlue)
-          }
+            // Mostrador de Combustível Digital: 8 quadrados que se apagam, 43L total, 9L reserva
+            DigitalFuelGauge(
+                telemetry = telemetry,
+                tankCapacity = profile.tankCapacityLiters.toFloat().takeIf { it > 10f } ?: 43.0f,
+                reserveThreshold = 9.0f,
+                modifier = Modifier.testTag("digital_fuel_gauge_portrait")
+            )
 
-          Column {
-            Text(text = "COMBUSTÍVEL FLEX — ETANOL", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Text(text = "${telemetry.ethanolPercentage}% Etanol / ${100 - telemetry.ethanolPercentage}% Gasolina", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text(text = telemetry.fuelTypeLabel, color = ElectricBlue, fontSize = 12.sp)
-          }
+            // Autonomia
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = telemetry.autonomyText,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextWhite
+                )
+                Text(
+                    text = stringResource(R.string.range),
+                    fontSize = 11.sp,
+                    color = TextMuted
+                )
+            }
         }
 
-        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = ElectricBlue)
-      }
-    }
+        Spacer(modifier = Modifier.height(2.dp))
 
-    // Hybrid specific section if hybrid
-    if (vehicle.isHybrid) {
-      CockpitCard(title = "SISTEMA HÍBRIDO TOYOTA (THS II)", icon = Icons.Default.Bolt) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-          TelemetryMetricItem(
-              "Bateria HV",
-              if (telemetry.hybridBatterySoc > 0) "${telemetry.hybridBatterySoc}%" else if (telemetry.isConnected) "Aguardando 7E2..." else "—",
-              if (telemetry.isHybridDetected) "SOC Lido (7E2)" else "Standby",
-              StatusGreen
-          )
-          TelemetryMetricItem(
-              "Motor Elétrico",
-              if (telemetry.hybridMotorPowerKw != 0f) String.format("%.1f kW", telemetry.hybridMotorPowerKw) else if (telemetry.isConnected) "0.0 kW" else "—",
-              if (telemetry.isHybridDetected) "ECU 7E2 Ativa" else "Standby",
-              ElectricBlue
-          )
-          TelemetryMetricItem(
-              "Status Híbrido",
-              if (telemetry.isHybridDetected) "Online (Mode 21)" else if (telemetry.isConnected) "Buscando 7E2" else "Desconectado",
-              "Regenerativo",
-              NeonCyan
-          )
+        // 3. Faixa de Energia Colorida Contínua com Setas Animadas (cor orientada pelo pedal do acelerador)
+        val pedalPortrait = telemetry.sensors["pedal_d"] ?: telemetry.sensors["pedal_e"]
+        val (accelPortrait, isPedalPortrait) = if (pedalPortrait != null && !pedalPortrait.isNaN()) {
+            Pair(pedalPortrait, true)
+        } else {
+            Pair(telemetry.throttlePercent, false)
         }
+        AnimatedEnergyRoad(
+            driveMode = telemetry.driveMode,
+            speedKmh = telemetry.speedKmh,
+            accelPercent = accelPortrait,
+            isPedal = isPedalPortrait,
+            ecuLinkOk = telemetry.ecuLinkOk,
+            modifier = Modifier.testTag("animated_energy_road")
+        )
+
         Spacer(modifier = Modifier.height(10.dp))
-        OutlinedButton(
-            onClick = {
-              showScanDialog = true
-              onRunHybridScan()
-            },
-            enabled = telemetry.isConnected && !hybridScanRunning,
-            modifier = Modifier.fillMaxWidth()
+
+        // 4. Mostradores abaixo do carro (toque em um deles para trocar o sensor)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-          Text(if (hybridScanRunning) "Varrendo..." else "Escanear sistema híbrido (diagnóstico)", fontSize = 12.sp)
+            SlotGauge(0, gaugeSlots, telemetry, 100.dp, onGaugeClick)
+            SlotGauge(1, gaugeSlots, telemetry, 100.dp, onGaugeClick)
+            SlotGauge(2, gaugeSlots, telemetry, 100.dp, onGaugeClick)
         }
-      }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SlotGauge(3, gaugeSlots, telemetry, 100.dp, onGaugeClick)
+            if (profile.isHybrid) {
+                SlotGauge(4, gaugeSlots, telemetry, 100.dp, onGaugeClick)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
     }
-
-    if (vehicle.isHybrid) {
-      HybridFlowCard(telemetry, onOpenFlow = onNavigateToEnergyFlow)
-    }
-
-    ShortcutsRow(onTrip = onNavigateToTrip, onCharts = onNavigateToCharts, onSensors = onNavigateToSensors)
-
-    ExtraTempsCard(telemetry)
-
-    VehicleInfoCard(
-        info = vehicleInfo,
-        loading = vehicleInfoLoading,
-        connected = telemetry.isConnected,
-        onRead = onReadVehicleInfo
-    )
-
-    // Grid of Secondary Gauges
-    Text(
-        text = "PARÂMETROS DE TELEMETRIA",
-        color = TextSecondary,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Bold,
-        letterSpacing = 1.sp
-    )
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-      CockpitMetricCard(
-          modifier = Modifier.weight(1f),
-          title = "ÁGUA MOTOR",
-          value = if (telemetry.coolantTemp != 0) "${telemetry.coolantTemp}°C" else "—",
-          subtitle = "Normal",
-          statusColor = StatusGreen,
-          icon = Icons.Default.Thermostat
-      )
-      CockpitMetricCard(
-          modifier = Modifier.weight(1f),
-          title = "CONSUMO MÉDIO",
-          value = if (telemetry.averageConsumption > 0f) String.format("%.1f", telemetry.averageConsumption) else "—",
-          subtitle = "KM/L",
-          statusColor = NeonCyan,
-          icon = Icons.Default.Eco
-      )
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-      CockpitMetricCard(
-          modifier = Modifier.weight(1f),
-          title = "CARGA MOTOR",
-          value = "${telemetry.engineLoad}%",
-          subtitle = "TPS Ativo",
-          statusColor = ElectricBlue,
-          icon = Icons.Default.Memory
-      )
-      CockpitMetricCard(
-          modifier = Modifier.weight(1f),
-          title = "TENSÃO BATERIA",
-          value = "${telemetry.batteryVoltage}V",
-          subtitle = "Alternador OK",
-          statusColor = StatusGreen,
-          icon = Icons.Default.BatteryChargingFull
-      )
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-      CockpitMetricCard(
-          modifier = Modifier.weight(1f),
-          title = "AR ADMISSÃO",
-          value = "${telemetry.intakeTemp}°C",
-          subtitle = "IAT Sensor",
-          statusColor = TextSecondary,
-          icon = Icons.Default.Air
-      )
-      CockpitMetricCard(
-          modifier = Modifier.weight(1f),
-          title = "PRESSÃO COLETOR",
-          value = "${telemetry.manifoldPressure.toInt()} kPa",
-          subtitle = "MAP Sensor",
-          statusColor = ElectricBlue,
-          icon = Icons.Default.Speed
-      )
-    }
-  }
 }
 
 @Composable
-fun CockpitCard(
-    modifier: Modifier = Modifier,
-    title: String,
-    icon: ImageVector,
-    content: @Composable () -> Unit
+private fun LandscapeDashboardLayout(
+    telemetry: TelemetryData,
+    profile: VehicleProfile,
+    onOpenSettings: () -> Unit,
+    diagnostics: DiagnosticsState,
+    onOpenDiagnostics: () -> Unit,
+    gaugeSlots: List<String>,
+    onGaugeClick: (Int) -> Unit
 ) {
-  Surface(
-      modifier = modifier,
-      shape = RoundedCornerShape(16.dp),
-      color = CockpitSurface,
-      border = BorderStroke(1.dp, CockpitCardBorder)
-  ) {
-    Column(modifier = Modifier.padding(14.dp)) {
-      Row(
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp)
-      ) {
-        Icon(icon, contentDescription = null, tint = ElectricBlue, modifier = Modifier.size(16.dp))
-        Text(text = title, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-      }
-      Spacer(modifier = Modifier.height(10.dp))
-      content()
+    val scrollState = rememberScrollState()
+
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Coluna Esquerda: Velocímetro e Tacômetro Lado a Lado ou verticais compactos
+        Column(
+            modifier = Modifier
+                .weight(1.0f)
+                .fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceEvenly
+        ) {
+            SpeedometerGauge(
+                currentSpeed = telemetry.speedKmh,
+                avgSpeed = telemetry.avgSpeedKmh,
+                maxSpeed = profile.maxSpeed,
+                size = 145.dp,
+                modifier = Modifier.testTag("gauge_speedometer_landscape")
+            )
+
+            TachometerGauge(
+                currentRpm = telemetry.rpm,
+                elapsedTimeFormatted = telemetry.formattedElapsedTime,
+                maxRpm = profile.maxRpm,
+                size = 145.dp,
+                modifier = Modifier.testTag("gauge_tachometer_landscape")
+            )
+        }
+
+        // Coluna Central: Como no vídeo do carro (Cabeçalho de estatísticas + Carro e Faixa Animada)
+        Column(
+            modifier = Modifier
+                .weight(1.4f)
+                .fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Barra superior com as 3 estatísticas como no vídeo do carro:
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "${telemetry.avgSpeedKmh.toInt()} km/h",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextWhite
+                    )
+                    Text(
+                        text = "Velocidade média",
+                        fontSize = 10.sp,
+                        color = TextMuted
+                    )
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = telemetry.formattedElapsedTime,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextWhite
+                    )
+                    Text(
+                        text = "Tempo decorrido",
+                        fontSize = 10.sp,
+                        color = TextMuted
+                    )
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = telemetry.autonomyText,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextWhite
+                    )
+                    Text(
+                        text = "Autonomia",
+                        fontSize = 10.sp,
+                        color = TextMuted
+                    )
+                }
+            }
+
+            FaultBanner(
+                diagnostics = diagnostics,
+                onClick = onOpenDiagnostics
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ConsumptionBlock(
+                    telemetry = telemetry,
+                    profile = profile,
+                    modifier = Modifier.weight(1.2f).testTag("consumption_block_landscape")
+                )
+                DigitalFuelGauge(
+                    telemetry = telemetry,
+                    tankCapacity = profile.tankCapacityLiters.toFloat().takeIf { it > 10f } ?: 43.0f,
+                    reserveThreshold = 9.0f,
+                    modifier = Modifier.padding(start = 12.dp).testTag("digital_fuel_gauge_landscape")
+                )
+            }
+
+            // Faixa de Energia com Carro e Setas Animadas (cor orientada pelo pedal do acelerador)
+            val pedalLandscape = telemetry.sensors["pedal_d"] ?: telemetry.sensors["pedal_e"]
+            val (accelLandscape, isPedalLandscape) = if (pedalLandscape != null && !pedalLandscape.isNaN()) {
+                Pair(pedalLandscape, true)
+            } else {
+                Pair(telemetry.throttlePercent, false)
+            }
+            AnimatedEnergyRoad(
+                driveMode = telemetry.driveMode,
+                speedKmh = telemetry.speedKmh,
+                accelPercent = accelLandscape,
+                isPedal = isPedalLandscape,
+                ecuLinkOk = telemetry.ecuLinkOk,
+                modifier = Modifier.testTag("animated_energy_road_landscape")
+            )
+
+            Spacer(modifier = Modifier.height(2.dp))
+        }
+
+        // Coluna Direita: manômetros menores (toque para trocar o sensor)
+        Column(
+            modifier = Modifier
+                .weight(1.0f)
+                .fillMaxHeight()
+                .verticalScroll(scrollState),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                SlotGauge(0, gaugeSlots, telemetry, 72.dp, onGaugeClick)
+                SlotGauge(1, gaugeSlots, telemetry, 72.dp, onGaugeClick)
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                SlotGauge(2, gaugeSlots, telemetry, 72.dp, onGaugeClick)
+                SlotGauge(3, gaugeSlots, telemetry, 72.dp, onGaugeClick)
+            }
+
+            if (profile.isHybrid) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    SlotGauge(4, gaugeSlots, telemetry, 72.dp, onGaugeClick)
+                }
+            }
+        }
     }
-  }
 }
 
 @Composable
-fun CockpitMetricCard(
+private fun BatteryVoltageGauge(
+    telemetry: TelemetryData,
+    size: androidx.compose.ui.unit.Dp,
     modifier: Modifier = Modifier,
-    title: String,
-    value: String,
-    subtitle: String,
-    statusColor: Color,
-    icon: ImageVector
+    label: String = stringResource(R.string.battery_voltage)
 ) {
-  Surface(
-      modifier = modifier,
-      shape = RoundedCornerShape(16.dp),
-      color = CockpitSurface,
-      border = BorderStroke(1.dp, CockpitCardBorder)
-  ) {
-    Column(modifier = Modifier.padding(14.dp)) {
-      Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-      ) {
-        Text(text = title, color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-        Icon(icon, contentDescription = null, tint = statusColor, modifier = Modifier.size(16.dp))
-      }
-      Spacer(modifier = Modifier.height(6.dp))
-      Text(text = value, color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Black)
-      Text(text = subtitle, color = statusColor, fontSize = 11.sp)
-    }
-  }
+    val v = telemetry.batteryVoltage
+    MiniGauge(
+        value = v,
+        minValue = 0f,
+        maxValue = 16f,
+        label = label,
+        unit = "V",
+        centerType = MiniGaugeCenterType.NEEDLE_BATTERY,
+        displayValue = if (v <= 0.1f) "--" else "%.1fV".format(v),
+        size = size,
+        modifier = modifier
+    )
 }
 
 @Composable
-fun TelemetryMetricItem(label: String, value: String, sub: String, color: Color) {
-  Column(horizontalAlignment = Alignment.CenterHorizontally) {
-    Text(text = label, color = TextSecondary, fontSize = 10.sp)
-    Text(text = value, color = color, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-    Text(text = sub, color = TextMuted, fontSize = 10.sp)
-  }
+private fun SocGauge(
+    telemetry: TelemetryData,
+    size: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+    label: String = stringResource(R.string.hybrid_soc)
+) {
+    MiniGauge(
+        value = if (telemetry.hybridSocAvailable) telemetry.hybridBatterySocPercent else 0f,
+        minValue = 0f,
+        maxValue = 100f,
+        label = label,
+        unit = "%",
+        centerType = MiniGaugeCenterType.NEEDLE_SOC,
+        displayValue = if (telemetry.hybridSocAvailable) "${telemetry.hybridBatterySocPercent.toInt()}%" else "--",
+        size = size,
+        modifier = modifier
+    )
+}
+
+/** Consumo médio (acima) e instantâneo (abaixo), centralizados. "~" = estimado pela tabela INMETRO. */
+/**
+ * Consumo médio e instantâneo lado a lado (retrato), alinhados aos manômetros de cima:
+ * média sob o velocímetro, instantâneo sob o tacômetro. Mesma lógica de [ConsumptionBlock].
+ */
+@Composable
+private fun ConsumptionRow(
+    telemetry: TelemetryData,
+    profile: VehicleProfile,
+    modifier: Modifier = Modifier
+) {
+    val prefix = if (telemetry.consumptionIsEstimated) "~" else ""
+    val avgText = if (telemetry.avgConsumptionKmPerL <= 0f) "--"
+    else prefix + "%.1f".format(telemetry.avgConsumptionKmPerL)
+
+    val inst = telemetry.instantConsumptionKmPerL
+    val instText = when {
+        telemetry.speedKmh < 3f || inst <= 0f -> "--"
+        inst >= 99f -> "∞"
+        else -> prefix + "%.1f".format(inst)
+    }
+    val inmetro = InmetroConsumption.forProfile(profile)
+    val reference = if (!telemetry.ethanolPercent.isNaN() && telemetry.ethanolPercent > 70f) inmetro.referenceEth else inmetro.referenceGas
+    val instColor = when {
+        instText == "--" -> TextMuted
+        inst >= 99f -> GaugeGreen
+        else -> InmetroConsumption.colorForConsumption(inst, reference)
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.Top
+    ) {
+        // Esquerda (sob o velocímetro): consumo médio
+        Column(
+            modifier = Modifier.width(152.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(avgText, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextWhite)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("km/L", fontSize = 11.sp, color = TextMuted, modifier = Modifier.padding(bottom = 3.dp))
+            }
+            Text(stringResource(R.string.avg_consumption), fontSize = 10.sp, color = TextMuted)
+        }
+
+        // Direita (sob o tacômetro): consumo instantâneo
+        Column(
+            modifier = Modifier.width(152.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(instText, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = instColor)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("km/L", fontSize = 11.sp, color = TextMuted, modifier = Modifier.padding(bottom = 3.dp))
+            }
+            Text(stringResource(R.string.instant_consumption), fontSize = 10.sp, color = TextMuted)
+        }
+    }
+}
+
+@Composable
+private fun ConsumptionBlock(
+    telemetry: TelemetryData,
+    profile: VehicleProfile,
+    modifier: Modifier = Modifier
+) {
+    val prefix = if (telemetry.consumptionIsEstimated) "~" else ""
+    val avgText = if (telemetry.avgConsumptionKmPerL <= 0f) "--"
+    else prefix + "%.1f".format(telemetry.avgConsumptionKmPerL)
+
+    val inst = telemetry.instantConsumptionKmPerL
+    val instText = when {
+        telemetry.speedKmh < 3f || inst <= 0f -> "--"
+        inst >= 99f -> "∞"
+        else -> prefix + "%.1f".format(inst)
+    }
+    val inmetro = InmetroConsumption.forProfile(profile)
+    val reference = if (!telemetry.ethanolPercent.isNaN() && telemetry.ethanolPercent > 70f) inmetro.referenceEth else inmetro.referenceGas
+    val instColor = when {
+        instText == "--" -> TextMuted
+        inst >= 99f -> GaugeGreen
+        else -> InmetroConsumption.colorForConsumption(inst, reference)
+    }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(avgText, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextWhite)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("km/L", fontSize = 12.sp, color = TextMuted, modifier = Modifier.padding(bottom = 4.dp))
+        }
+        Text(stringResource(R.string.avg_consumption), fontSize = 10.sp, color = TextMuted)
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(instText, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = instColor)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("km/L", fontSize = 11.sp, color = TextMuted, modifier = Modifier.padding(bottom = 3.dp))
+        }
+        Text(stringResource(R.string.instant_consumption), fontSize = 10.sp, color = TextMuted)
+    }
+}
+
+private fun Float.safe(fallback: Float) = if (isNaN()) fallback else this
+private fun Float.degrees() = if (isNaN()) "--" else "${toInt()}°C"
+
+/** Aviso de falha: aparece quando a luz de injeção acende ou a ECU registra códigos. */
+@Composable
+private fun FaultBanner(
+    diagnostics: DiagnosticsState,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (!diagnostics.hasFaults) return
+    val color = if (diagnostics.worstSeverity == DTCLevel.CRITICAL) GaugeRed else GaugeYellow
+    val first = diagnostics.all.firstOrNull()
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(color.copy(alpha = 0.14f))
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag("fault_banner"),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.Warning,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (diagnostics.milOn == true) "Luz de injeção acesa" else "Códigos de falha detectados",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = color
+            )
+            if (first != null) {
+                Text(
+                    text = "${first.code} - ${first.info.title}: ${first.info.description}",
+                    fontSize = 11.sp,
+                    color = TextWhite,
+                    maxLines = 2
+                )
+                val others = diagnostics.all.size - 1
+                if (others > 0) {
+                    Text("+$others outro(s) código(s)", fontSize = 10.sp, color = TextMuted)
+                }
+            } else {
+                Text(
+                    text = "A ECU registrou ${diagnostics.reportedCount} código(s). Toque para ver o significado.",
+                    fontSize = 11.sp,
+                    color = TextWhite
+                )
+            }
+        }
+        Text("VER", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = color)
+    }
 }

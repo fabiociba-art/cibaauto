@@ -5,1110 +5,1085 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.util.Log
+import com.example.model.BluetoothDeviceItem
+import com.example.model.CustomPidQuery
+import com.example.model.DiagnosticsState
+import com.example.model.DriveMode
+import com.example.model.DtcKind
+import com.example.model.dtcEntryOf
+import com.example.model.HybridEnergyFlowState
+import com.example.model.SensorRegistry
+import com.example.model.ObdConnectionState
+import com.example.model.TelemetryData
+import com.example.model.VehicleProfile
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
-import java.lang.reflect.Method
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Gerenciador REAL de comunicação OBD-II via ELM327.
- * Sem nenhuma simulação.
+ * Cliente ELM327 (Bluetooth Classic / SPP).
  *
- * Suporta:
- *  - Bluetooth Classic SPP (UUID padrão ELM327)
- *  - Fallback por reflexão (createRfcommSocket) para clones baratos
- *  - Wi-Fi / TCP (IP padrão 192.168.0.10:35000)
+ * Pontos principais:
+ *  - Toda resposta é lida até o prompt '>' do ELM327 (com timeout), evitando respostas trocadas entre PIDs.
+ *  - O init só marca CONECTADO depois que a ECU responde (0100).
+ *  - Consulta só os PIDs que a ECU declara suportar (bitmaps 0100/0120/0140/0160).
+ *  - PIDs rápidos (velocidade, RPM, vazão, TPS) a cada ciclo; os lentos giram 1 por ciclo.
+ *  - Perda de enlace => reconexão automática (até MAX_RECONNECTS) e depois ERROR.
+ *  - Valores indisponíveis ficam NaN (a UI mostra "--"), nunca valores inventados.
  */
 class ObdManager {
 
     companion object {
-        private const val TAG = "CibaObdManager"
-        private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-        private const val WIFI_DEFAULT_HOST = "192.168.0.10"
-        private const val WIFI_DEFAULT_PORT = 35000
-        private const val CMD_TIMEOUT_MS = 3000L
+        private const val TAG = "CibaAuto_OBD"
+        val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
-        /**
-         * O PID Mode 21 "CE" original NÃO é verificado para o Corolla 2026 (os PIDs Toyota
-         * mudam por geração: os do Prius Gen3 não servem no Corolla híbrido). Enquanto não
-         * houver um PID confirmado via [probeHybrid], deixe false para não exibir lixo na tela.
-         */
-        private const val EXPERIMENTAL_TOYOTA_MODE21 = false
+        private const val MAX_RECONNECTS = 3
+        private const val MAX_ECU_WAITS = 4          // tentativas extras esperando a ECU (ignição desligada)
+        private const val MAX_SILENT_REPLIES = 8      // respostas vazias seguidas => enlace caiu
+        private const val PID_FAILS_TO_DISABLE = 8
+
+        // Sondagem de PIDs que a ECU não anuncia na lista de suportados (ver probeUndeclaredPid)
+        private const val PROBE_EVERY_N_CYCLES = 3   // 1 consulta de sondagem a cada 3 ciclos
+        private const val PROBE_FAILS_TO_STOP = 3    // desiste do PID após 3 tentativas sem resposta
+
+        private const val PID_STATUS = 0x01
+        private const val PID_ENGINE_LOAD = 0x04
+        private const val PID_COOLANT = 0x05
+        private const val PID_MAP = 0x0B
+        private const val PID_RPM = 0x0C
+        private const val PID_SPEED = 0x0D
+        private const val PID_MAF = 0x10
+        private const val PID_TPS = 0x11
+        private const val PID_FUEL_LEVEL = 0x2F
+        // Corolla Hybrid: fuel level via Combination Meter (header 7C0, Mode 21 PID 29 or Mode 22 PID 1022)
+        private const val CUSTOM_FUEL_HEADER = "7C0"
+        private const val CUSTOM_FUEL_PID = "2129"
+        private const val CUSTOM_FUEL_RESPONSE = "6129"
+        private const val CUSTOM_FUEL_PID_ALT = "221022"
+        private const val CUSTOM_FUEL_RESPONSE_ALT = "621022" 
+        private const val PID_BARO = 0x33
+        private const val PID_ETHANOL = 0x52
+        private const val PID_HYBRID_BATT = 0x5B
+        // Híbridos Toyota: ECU da bateria HV responde no header 7E2 (resposta 7EA)
+        private const val HV_HEADER = "7E2"
+        private const val HV_FAILS_TO_STOP = 6
+        private const val PID_OIL_TEMP = 0x5C
+        private const val PID_FUEL_RATE = 0x5E
+
+        private val CORE_PIDS = setOf(PID_SPEED, PID_RPM)
+
+        // Combustível brasileiro: gasolina comum ~E27
+        private const val DEFAULT_ETHANOL_FRACTION = 0.27f
     }
 
-    private val initializationCommands = listOf(
-        "ATZ",   // Reset
-        "ATE0",  // Echo off
-        "ATL0",  // Linefeeds off
-        "ATS0",  // Spaces off
-        "ATH0",  // Headers off
-        "ATSP0", // Auto protocol
-        "ATCAF1", // CAN auto-formatting (ELM monta os bytes PCI do ISO-TP)
-        "ATAT1", // Adaptive timing
-        "ATST64" // Timeout de resposta ~400 ms (ECUs híbridas Toyota são mais lentas)
-    )
+    private val _connectionState = MutableStateFlow(ObdConnectionState.DISCONNECTED)
+    val connectionState: StateFlow<ObdConnectionState> = _connectionState.asStateFlow()
 
-    private var bluetoothSocket: BluetoothSocket? = null
-    private var wifiSocket: Socket? = null
-    private var outputStream: OutputStream? = null
-    private var inputReader: BufferedReader? = null
-    private val isConnected = AtomicBoolean(false)
-    private var connectionType: ConnectionType = ConnectionType.NONE
+    private val _connectedDevice = MutableStateFlow<BluetoothDeviceItem?>(null)
+    val connectedDevice: StateFlow<BluetoothDeviceItem?> = _connectedDevice.asStateFlow()
 
-    enum class ConnectionType { NONE, BLUETOOTH, WIFI }
+    private val _diagnosticLogs = MutableStateFlow<List<String>>(emptyList())
+    val diagnosticLogs: StateFlow<List<String>> = _diagnosticLogs.asStateFlow()
 
-    data class PidResult(
-        val rpm: Int? = null,
-        val speed: Float? = null,
-        val coolantTemp: Int? = null,
-        val intakeTemp: Int? = null,
-        val engineLoad: Int? = null,
-        val manifoldPressure: Float? = null,
-        val throttlePosition: Int? = null,
-        val batteryVoltage: Float? = null,
-        val ethanolPercentage: Int? = null,
-        val maf: Float? = null,
-        val fuelRateLph: Float? = null,
-        val fuelPressure: Float? = null,
-        val odometerKm: Float? = null,
-        val fuelLevelPercent: Float? = null,
-        val hybridBatterySoc: Int? = null,
-        val hybridMotorPowerKw: Float? = null,
-        val isHybridDetected: Boolean = false,
-        val oilTemp: Int? = null,
-        val ambientTemp: Int? = null,
-        val catalystTemp: Int? = null,
-        val hybridExtras: Map<String, String> = emptyMap()
-    )
+    // ---- Diagnóstico (códigos de falha) ----
+    private val _diagnostics = MutableStateFlow(DiagnosticsState())
+    val diagnostics: StateFlow<DiagnosticsState> = _diagnostics.asStateFlow()
 
-    /** Dados do Mode 09 (VIN, calibração) + tipo de combustível (01 51). */
-    data class VehicleInfo(
-        val vin: String = "",
-        val calibrationId: String = "",
-        val fuelType: String = ""
-    )
+    private enum class DiagRequest { SCAN, CLEAR }
+    private val diagRequests = Channel<DiagRequest>(Channel.BUFFERED)
+    @Volatile private var isCanProtocol = true
 
-    /**
-     * PID proprietário do híbrido (Mode 21/22) a ser lido continuamente.
-     * A lista [hybridPidDefs] está VAZIA de propósito: só preencher com PIDs confirmados
-     * pela varredura (probeHybrid) no Corolla 2026 — chutar PID mostra número errado na tela.
-     * responseTag = bytes de eco da resposta (ex.: "61CE"); byteOffset conta a partir do 1º byte de dados.
-     */
-    data class HybridPidDef(
-        val key: String,
-        val label: String,
-        val unit: String,
-        val header: String,
-        val command: String,
-        val responseTag: String,
-        val byteOffset: Int,
-        val byteCount: Int = 1,
-        val scale: Float = 1f,
-        val offset: Float = 0f,
-        val signed: Boolean = false
-    )
+    /** Pede a leitura dos códigos (executada pelo loop de leitura, sem conflitar com os PIDs). */
+    fun requestScan() {
+        if (_connectionState.value == ObdConnectionState.CONNECTED) {
+            _diagnostics.update { it.copy(isScanning = true, message = null) }
+            diagRequests.trySend(DiagRequest.SCAN)
+        } else {
+            _diagnostics.update { it.copy(message = "Conecte o adaptador OBD para ler os códigos.") }
+        }
+    }
 
-    private val hybridPidDefs: List<HybridPidDef> = emptyList()
+    /** Pede o apagamento dos códigos (modo 04). A UI deve confirmar com o usuário antes. */
+    fun requestClear() {
+        if (_connectionState.value == ObdConnectionState.CONNECTED) {
+            _diagnostics.update { it.copy(isScanning = true, message = null) }
+            diagRequests.trySend(DiagRequest.CLEAR)
+        } else {
+            _diagnostics.update { it.copy(message = "Conecte o adaptador OBD para apagar os códigos.") }
+        }
+    }
 
-    data class DtcResult(
-        val codes: List<String>,
-        val milOn: Boolean
-    )
+    @Volatile private var socket: BluetoothSocket? = null
+    @Volatile private var inputStream: InputStream? = null
+    @Volatile private var outputStream: OutputStream? = null
+    @Volatile private var pollJob: Job? = null
+    @Volatile private var generation = 0
+    @Volatile private var profile: VehicleProfile? = null
 
-    /** Info de dispositivo Bluetooth para a UI */
-    data class BtDeviceInfo(
-        val name: String,
-        val address: String,
-        val isLikelyObd: Boolean
-    )
+    private var silentReplies = 0
+    private var lastSeenDtcCount = -1
+    private var verboseLog = true
+    private val pidFailures = mutableMapOf<Int, Int>()
+    private val disabledPids = mutableSetOf<Int>()
+    // Sondagem de PIDs não anunciados: contadores próprios (não mexem em pidFailures/disabledPids)
+    private val probeFails = mutableMapOf<Int, Int>()
+    private val probeConfirmed = mutableSetOf<Int>()
 
-    /**
-     * Lista dispositivos Bluetooth já pareados no sistema.
-     * Marca como "provável OBD" se o nome contiver palavras-chave conhecidas.
-     */
+    private class LinkLostException(msg: String) : IOException(msg)
+
+    private sealed class InitResult {
+        data class Ready(val supported: Set<Int>) : InitResult()
+        data class NoEcu(val reason: String) : InitResult()
+    }
+
+    fun addLog(msg: String) {
+        Log.d(TAG, msg)
+        _diagnosticLogs.update { old ->
+            val list = if (old.size >= 60) old.drop(old.size - 59) else old
+            list + msg
+        }
+    }
+
+    /** Permite trocar o perfil do veículo sem reconectar. */
+    fun updateProfile(newProfile: VehicleProfile) {
+        profile = newProfile
+    }
+
     @SuppressLint("MissingPermission")
-    fun listPairedDevices(
-        preferredNameHints: List<String> = listOf(
-            "OBD", "ELM", "Vgate", "OBDII", "OBD-II", "Android-Vlink",
-            "BT", "VLink", "OBDLink", "ScanTool", "Carista", "KONNWEI",
-            "Viecar", "Bafx", "FIXD", "BlueDriver", "ADB"
-        )
-    ): List<BtDeviceInfo> {
+    fun getPairedDevices(): List<BluetoothDeviceItem> {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: return emptyList()
-        if (!adapter.isEnabled) return emptyList()
-        val bonded = adapter.bondedDevices ?: return emptyList()
-        return bonded.map { device ->
-            val name = device.name ?: "Dispositivo sem nome"
-            val upper = name.uppercase()
-            val likely = preferredNameHints.any { hint -> upper.contains(hint.uppercase()) }
-            BtDeviceInfo(name = name, address = device.address, isLikelyObd = likely)
-        }.sortedWith(compareByDescending<BtDeviceInfo> { it.isLikelyObd }.thenBy { it.name })
-    }
-
-    fun isBluetoothEnabled(): Boolean {
-        val adapter = BluetoothAdapter.getDefaultAdapter()
-        return adapter != null && adapter.isEnabled
-    }
-
-    /**
-     * Conecta em um dispositivo específico pelo endereço MAC.
-     */
-    @SuppressLint("MissingPermission")
-    suspend fun connectBluetoothToAddress(
-        address: String,
-        onLog: (String) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
-        try {
-            disconnectInternal()
-            onLog("Conectando ao dispositivo selecionado: $address")
-
-            val adapter = BluetoothAdapter.getDefaultAdapter()
-            if (adapter == null || !adapter.isEnabled) {
-                onLog("Bluetooth desligado ou indisponível.")
-                return@withContext false
-            }
-
-            val device = try {
-                adapter.getRemoteDevice(address)
-            } catch (e: Exception) {
-                onLog("Endereço Bluetooth inválido: $address")
-                return@withContext false
-            }
-
-            val name = device.name ?: address
-            onLog("Dispositivo: $name ($address)")
-
-            val socket = tryCreateSocket(device, onLog)
-            if (socket == null) {
-                onLog("Não foi possível criar socket RFCOMM para este dispositivo.")
-                return@withContext false
-            }
-
-            try {
-                adapter.cancelDiscovery()
-                if (!socket.isConnected) {
-                    socket.connect()
-                }
-                bluetoothSocket = socket
-                outputStream = socket.outputStream
-                inputReader = BufferedReader(InputStreamReader(socket.inputStream))
-                connectionType = ConnectionType.BLUETOOTH
-                isConnected.set(true)
-
-                onLog("Socket aberto. Inicializando ELM327...")
-                val ok = runInitialization(onLog)
-                if (ok) {
-                    onLog("Conexão Bluetooth OBD-2 estabelecida com $name.")
-                    true
-                } else {
-                    onLog("Inicialização do ELM327 falhou neste dispositivo.")
-                    disconnectInternal()
-                    false
-                }
-            } catch (e: Exception) {
-                onLog("Falha ao conectar em $name: ${e.message}")
-                try { socket.close() } catch (_: Exception) {}
-                disconnectInternal()
-                false
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "connectBluetoothToAddress error", e)
-            onLog("Erro: ${e.message}")
-            disconnectInternal()
-            false
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    suspend fun connectBluetooth(
-        preferredNameHints: List<String> = listOf(
-            "OBD", "ELM", "Vgate", "OBDII", "OBD-II", "Android-Vlink",
-            "BT", "VLink", "OBDLink", "ScanTool", "Carista", "KONNWEI",
-            "Viecar", "Bafx", "FIXD", "BlueDriver"
-        ),
-        onLog: (String) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
-        try {
-            disconnectInternal()
-            onLog("Procurando adaptador Bluetooth ELM327 pareado...")
-
-            val adapter = BluetoothAdapter.getDefaultAdapter()
-            if (adapter == null) {
-                onLog("Bluetooth não disponível neste aparelho.")
-                return@withContext false
-            }
-            if (!adapter.isEnabled) {
-                onLog("Bluetooth está desligado. Ligue o Bluetooth e tente novamente.")
-                return@withContext false
-            }
-
-            val bonded = adapter.bondedDevices ?: emptySet()
-            onLog("Dispositivos Bluetooth pareados: ${bonded.size}")
-
-            if (bonded.isEmpty()) {
-                onLog("Nenhum dispositivo pareado. Vá em Configurações > Bluetooth e pareie o ELM327 primeiro.")
-                return@withContext false
-            }
-
-            // Lista todos os pareados no log para debug
-            bonded.forEach { d ->
-                onLog("  → ${d.name ?: "sem nome"} [${d.address}]")
-            }
-
-            // Prioriza dispositivos cujo nome contenha hints conhecidos de OBD
-            val candidates = bonded.filter { device ->
-                val name = device.name?.uppercase() ?: ""
-                preferredNameHints.any { hint -> name.contains(hint.uppercase()) }
-            }.ifEmpty { bonded.toList() }
-
-            var lastError: String? = null
-
-            for (candidate in candidates) {
-                onLog("Tentando: ${candidate.name} (${candidate.address})")
-                val socket = tryCreateSocket(candidate, onLog)
-                if (socket != null) {
-                    try {
-                        adapter.cancelDiscovery()
-                        if (!socket.isConnected) {
-                            socket.connect()
-                        }
-                        bluetoothSocket = socket
-                        outputStream = socket.outputStream
-                        inputReader = BufferedReader(InputStreamReader(socket.inputStream))
-                        connectionType = ConnectionType.BLUETOOTH
-                        isConnected.set(true)
-
-                        onLog("Socket Bluetooth aberto. Inicializando ELM327...")
-                        val ok = runInitialization(onLog)
-                        if (ok) {
-                            onLog("Conexão Bluetooth OBD-2 estabelecida com ${candidate.name}.")
-                            return@withContext true
-                        } else {
-                            onLog("Inicialização falhou neste dispositivo. Tentando próximo...")
-                            disconnectInternal()
-                        }
-                    } catch (e: Exception) {
-                        lastError = e.message
-                        onLog("Falha ao conectar em ${candidate.name}: ${e.message}")
-                        try { socket.close() } catch (_: Exception) {}
-                        disconnectInternal()
-                    }
-                }
-            }
-
-            onLog("Não foi possível conectar a nenhum dispositivo pareado. Último erro: $lastError")
-            false
-        } catch (e: Exception) {
-            Log.e(TAG, "Bluetooth connect error", e)
-            onLog("Erro Bluetooth: ${e.message}")
-            disconnectInternal()
-            false
-        }
-    }
-
-    /**
-     * Tenta criar socket de duas formas:
-     * 1. createRfcommSocketToServiceRecord (padrão)
-     * 2. Reflexão createRfcommSocket(int channel) – necessário em muitos clones chineses
-     */
-    @SuppressLint("MissingPermission")
-    private fun tryCreateSocket(device: BluetoothDevice, onLog: (String) -> Unit): BluetoothSocket? {
-        // Método 1: UUID padrão SPP
-        try {
-            val socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-            onLog("Socket criado via UUID SPP.")
-            return socket
-        } catch (e: Exception) {
-            onLog("createRfcommSocketToServiceRecord falhou: ${e.message}")
-        }
-
-        // Método 2: reflexão (channel 1) – muito comum em ELM327 genéricos
-        try {
-            val method: Method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-            val socket = method.invoke(device, 1) as BluetoothSocket
-            onLog("Socket criado via reflexão (channel 1).")
-            return socket
-        } catch (e: Exception) {
-            onLog("Reflexão createRfcommSocket falhou: ${e.message}")
-        }
-
-        // Método 3: insecure
-        try {
-            val socket = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
-            onLog("Socket criado via InsecureRfcomm.")
-            return socket
-        } catch (e: Exception) {
-            onLog("createInsecureRfcommSocketToServiceRecord falhou: ${e.message}")
-        }
-
-        return null
-    }
-
-    suspend fun connectWifi(
-        host: String = WIFI_DEFAULT_HOST,
-        port: Int = WIFI_DEFAULT_PORT,
-        onLog: (String) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
-        try {
-            disconnectInternal()
-            onLog("Tentando conexão Wi-Fi ELM327 em $host:$port ...")
-
-            val socket = Socket()
-            socket.connect(InetSocketAddress(host, port), 5000)
-            socket.soTimeout = CMD_TIMEOUT_MS.toInt()
-
-            wifiSocket = socket
-            outputStream = socket.getOutputStream()
-            inputReader = BufferedReader(InputStreamReader(socket.getInputStream()))
-            connectionType = ConnectionType.WIFI
-            isConnected.set(true)
-
-            onLog("Socket TCP aberto. Inicializando ELM327...")
-            val ok = runInitialization(onLog)
-            if (!ok) {
-                disconnectInternal()
-                return@withContext false
-            }
-            onLog("Conexão Wi-Fi OBD-2 estabelecida ($host).")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "WiFi connect error", e)
-            onLog("Erro Wi-Fi ($host): ${e.message}")
-            disconnectInternal()
-            false
-        }
-    }
-
-    /**
-     * Tenta Bluetooth primeiro; se falhar, tenta Wi-Fi no IP clássico.
-     */
-    suspend fun connectAuto(onLog: (String) -> Unit): Boolean {
-        val btOk = connectBluetooth(onLog = onLog)
-        if (btOk) return true
-        onLog("Bluetooth falhou. Tentando Wi-Fi (192.168.0.10:35000)...")
-        return connectWifi(onLog = onLog)
-    }
-
-    private suspend fun runInitialization(onLog: (String) -> Unit): Boolean {
-        // Aguarda o ELM327 resetar após ATZ
-        delay(1200)
-
-        for (cmd in initializationCommands) {
-            onLog(">> $cmd")
-            val resp = sendCommand(cmd)
-            onLog("<< ${resp.trim()}")
-
-            // ATZ sempre retorna algo com "ELM" ou versão; se der timeout total, falha
-            if (cmd == "ATZ") {
-                if (resp.isBlank() || resp.contains("ERROR", ignoreCase = true) || resp.contains("NO STREAM") || resp.contains("NOT CONNECTED")) {
-                    onLog("Falha crítica no ATZ – adaptador não respondeu.")
-                    return false
-                }
-            } else if (resp.contains("ERROR", ignoreCase = true) || resp.contains("?")) {
-                // Alguns clones respondem "?" em comandos opcionais; não é fatal
-                if (cmd in listOf("ATAT1", "ATST64", "ATCAF1")) {
-                    onLog("Comando opcional $cmd ignorado.")
-                } else {
-                    onLog("Aviso no comando $cmd: $resp")
-                }
-            }
-            delay(150)
-        }
-        detectProtocol(onLog)
-        return true
-    }
-
-    /** Protocolo detectado (resultado do ATDPN), ex.: "A6" = auto + ISO 15765-4 CAN 11bit 500k. */
-    var detectedProtocol: String = ""
-        private set
-
-    /** true quando a ECU respondeu ao Mode 01 PID 00 (ignição ligada e protocolo resolvido). */
-    var ecuResponding: Boolean = false
-        private set
-
-    /** PIDs Mode 01 suportados pelo carro (detectados na conexão). */
-    private val supportedPids = mutableSetOf<String>()
-
-    /** Verifica se um PID Mode 01 é suportado (ex.: "0C", "10", "5E"). */
-    fun isPidSupported(pid: String): Boolean {
-        if (supportedPids.isEmpty()) return true // ainda não detectou, tenta tudo
-        return supportedPids.contains(pid.uppercase())
-    }
-
-    /**
-     * ATSP0 faz o ELM327 procurar o protocolo na PRIMEIRA consulta ("SEARCHING...").
-     * Isso leva vários segundos e estourava o timeout de 3 s: a resposta era descartada no
-     * próximo comando e o app ficava "conectado" mas sem nenhum dado.
-     * Aqui forçamos essa primeira consulta com timeout longo e, se falhar, tentamos
-     * fixar CAN 11-bit/500k (protocolo 6, usado pelo Corolla 2020+).
-     */
-    private suspend fun detectProtocol(onLog: (String) -> Unit) {
-        ecuResponding = false
-        onLog("Detectando protocolo da ECU (pode levar até 15 s). Ignição ligada / carro em READY?")
-        var resp = sendCommand("0100", 15000L)
-        onLog("<< 0100: ${resp.trim()}")
-        if (!resp.contains("41", ignoreCase = true) || resp.contains("UNABLE", true) || resp.contains("ERROR", true)) {
-            onLog("Auto-detecção falhou. Fixando CAN 11-bit 500k (ATSP6)...")
-            sendCommand("ATSP6")
-            resp = sendCommand("0100", 8000L)
-            onLog("<< 0100: ${resp.trim()}")
-        }
-        ecuResponding = cleanHex(resp).contains("4100")
-        detectedProtocol = sendCommand("ATDPN").trim()
-        onLog("Protocolo: $detectedProtocol (${sendCommand("ATDP").trim()})")
-        onLog(
-            if (ecuResponding) "ECU respondeu ao Mode 01. Leitura habilitada."
-            else "ECU NÃO respondeu. Ligue o carro (READY), confira o adaptador na porta OBD e tente de novo."
-        )
-    }
-
-    /**
-     * Detecta quais PIDs Mode 01 o carro suporta (lendo 0100, 0120, 0140, 0160).
-     * Chamar uma vez após a conexão.
-     */
-    suspend fun probeSupportedPids(onLog: (String) -> Unit = {}) {
-        supportedPids.clear()
-        val ranges = listOf("00" to 0x01, "20" to 0x21, "40" to 0x41, "60" to 0x61)
-        for ((pid, base) in ranges) {
-            val resp = cleanHex(sendCommand("01$pid", 5000L))
-            val idx = resp.indexOf("41$pid")
-            if (idx < 0 || resp.length < idx + 12) continue
-            try {
-                val a = resp.substring(idx + 4, idx + 6).toInt(16)
-                val b = resp.substring(idx + 6, idx + 8).toInt(16)
-                val c = resp.substring(idx + 8, idx + 10).toInt(16)
-                val d = resp.substring(idx + 10, idx + 12).toInt(16)
-                val mask = (a shl 24) or (b shl 16) or (c shl 8) or d
-                for (bit in 0 until 32) {
-                    if ((mask and (1 shl (31 - bit))) != 0) {
-                        val p = base + bit
-                        if (p <= 0xFF) supportedPids.add("%02X".format(p))
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-        onLog("PIDs suportados detectados: ${supportedPids.size} (${supportedPids.sorted().take(12).joinToString()}${if (supportedPids.size > 12) "..." else ""})")
-    }
-
-
-    suspend fun sendCommand(command: String, timeoutMs: Long = CMD_TIMEOUT_MS): String = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) return@withContext "NOT CONNECTED"
-        try {
-            val out = outputStream ?: return@withContext "NO STREAM"
-            val reader = inputReader ?: return@withContext "NO READER"
-
-            // Limpa qualquer dado residual no buffer
-            while (reader.ready()) {
-                reader.read()
-            }
-
-            out.write("$command\r".toByteArray(Charsets.US_ASCII))
-            out.flush()
-
-            val response = StringBuilder()
-            val start = System.currentTimeMillis()
-            var foundPrompt = false
-
-            while (System.currentTimeMillis() - start < timeoutMs && !foundPrompt) {
-                if (reader.ready()) {
-                    val ch = reader.read()
-                    if (ch == -1) break
-                    val c = ch.toChar()
-                    if (c == '>') {
-                        foundPrompt = true
-                    } else {
-                        response.append(c)
-                    }
-                } else {
-                    delay(15)
-                }
-            }
-
-            // Remove echo do comando e limpa
-            var cleaned = response.toString()
-                .replace(command, "", ignoreCase = true)
-                .replace("\r", " ")
-                .replace("\n", " ")
-                .replace(Regex("\\s+"), " ")
-                .trim()
-
-            cleaned
-        } catch (e: Exception) {
-            Log.e(TAG, "sendCommand error", e)
-            "ERROR: ${e.message}"
-        }
-    }
-
-    private var pidCycleCount = 0
-
-    /**
-     * Lê os PIDs principais (Mode 01) e opcionalmente dados do sistema Híbrido Toyota (Mode 21 via Header 7E2).
-     */
-    suspend fun readMainPids(queryHybrid: Boolean = false): PidResult = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) return@withContext PidResult()
-        pidCycleCount++
-
-        val rpm = if (isPidSupported("0C")) parseRpm(sendCommand("010C")) else null
-        val speed = if (isPidSupported("0D")) parseSpeed(sendCommand("010D")) else null
-        val coolant = if (isPidSupported("05")) parseTemp(sendCommand("0105")) else null
-        val intake = if (isPidSupported("0F")) parseTemp(sendCommand("010F")) else null
-        val load = if (isPidSupported("04")) parsePercent(sendCommand("0104")) else null
-        val map = if (isPidSupported("0B")) parseMap(sendCommand("010B")) else null
-        val tps = if (isPidSupported("11")) parsePercent(sendCommand("0111")) else null
-        val voltage = if (isPidSupported("42")) parseVoltage(sendCommand("0142")) else null
-        val maf = if (isPidSupported("10")) parseMaf(sendCommand("0110")) else null
-        val fuelPress = if (isPidSupported("0A")) parseFuelPressure(sendCommand("010A")) else null
-        // PID 5E = Engine Fuel Rate (L/h) — preferido quando disponível
-        val fuelRateLph = if (isPidSupported("5E")) parseFuelRate(sendCommand("015E")) else null
-
-        // PIDs de menor frequência (economiza banda no barramento e acelera medidores rápidos)
-        val ethanol = if (isPidSupported("52") && (pidCycleCount % 6 == 0 || pidCycleCount == 1)) parseEthanol(sendCommand("0152")) else null
-        val fuelLevel = if (isPidSupported("2F") && (pidCycleCount % 10 == 0 || pidCycleCount == 1)) parseFuelLevel(sendCommand("012F")) else null
-        val odo = if (isPidSupported("A6") && (pidCycleCount % 15 == 0 || pidCycleCount == 1)) parseOdometer(sendCommand("01A6")) else null
-
-        // Sistema híbrido: 1) PID padrão SAE 01 5B (vida restante da bateria HV) e
-        // 2) Mode 21 proprietário (experimental, desligado por padrão — veja EXPERIMENTAL_TOYOTA_MODE21).
-        var hybridSoc: Int? = null
-        var hybridKw: Float? = null
-        var hybridDetected = false
-
-        if (queryHybrid && (pidCycleCount % 4 == 0 || pidCycleCount <= 2)) {
-            val std = parseHybridPackLife(sendCommand("015B"))
-            if (std != null) {
-                hybridSoc = std
-                hybridDetected = true
-            }
-            if (EXPERIMENTAL_TOYOTA_MODE21) {
-                val hybridData = readToyotaHybridData()
-                if (hybridData != null) {
-                    hybridSoc = hybridData.first
-                    hybridKw = hybridData.second
-                    hybridDetected = true
-                }
-            }
-        }
-
-        // Temperaturas extras (nem todo carro responde; null = não suportado)
-        val extraTemps = pidCycleCount % 6 == 2 || pidCycleCount == 1
-        val oilT = if (extraTemps) parseSimpleTemp(sendCommand("015C"), "415C") else null
-        val ambT = if (extraTemps) parseSimpleTemp(sendCommand("0146"), "4146") else null
-        val catT = if (extraTemps) parseCatalystTemp(sendCommand("013C")) else null
-
-        val extras = if (queryHybrid && hybridPidDefs.isNotEmpty() && pidCycleCount % 3 == 0) readHybridExtras() else emptyMap()
-
-        PidResult(
-            rpm = rpm,
-            speed = speed,
-            coolantTemp = coolant,
-            intakeTemp = intake,
-            engineLoad = load,
-            manifoldPressure = map,
-            throttlePosition = tps,
-            batteryVoltage = voltage,
-            ethanolPercentage = ethanol,
-            maf = maf,
-            fuelRateLph = fuelRateLph,
-            fuelPressure = fuelPress,
-            odometerKm = odo,
-            fuelLevelPercent = fuelLevel,
-            hybridBatterySoc = hybridSoc,
-            hybridMotorPowerKw = hybridKw,
-            isHybridDetected = hybridDetected,
-            oilTemp = oilT,
-            ambientTemp = ambT,
-            catalystTemp = catT,
-            hybridExtras = extras
-        )
-    }
-
-    private suspend fun readHybridExtras(): Map<String, String> {
-        val out = mutableMapOf<String, String>()
-        try {
-            for ((header, defs) in hybridPidDefs.groupBy { it.header }) {
-                sendCommand("ATSH$header")
-                for (d in defs) {
-                    val c = cleanHex(sendCommand(d.command))
-                    val idx = c.indexOf(d.responseTag.uppercase())
-                    if (idx < 0) continue
-                    val start = idx + d.responseTag.length + d.byteOffset * 2
-                    val end = start + d.byteCount * 2
-                    if (c.length < end) continue
-                    var raw = c.substring(start, end).toLong(16)
-                    if (d.signed) {
-                        val bits = d.byteCount * 8
-                        if (raw >= (1L shl (bits - 1))) raw -= (1L shl bits)
-                    }
-                    out[d.label + "|" + d.unit] = String.format("%.1f", raw * d.scale + d.offset)
-                }
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "Hybrid extras error: ${e.message}")
-        } finally {
-            try { sendCommand("ATSH7DF") } catch (_: Exception) {}
-        }
-        return out
-    }
-
-    /** Mode 09 02 (VIN), 09 04 (Calibration ID) e 01 51 (tipo de combustível). */
-    suspend fun readVehicleInfo(): VehicleInfo = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) return@withContext VehicleInfo()
-        val vin = parseMode09Ascii(sendCommand("0902", 6000L), "490201").filter { it.isLetterOrDigit() }.takeLast(17)
-        val cal = parseMode09Ascii(sendCommand("0904", 6000L), "490401").trim()
-        val fuel = parseFuelType(sendCommand("0151"))
-        VehicleInfo(vin = vin, calibrationId = cal, fuelType = fuel)
-    }
-
-    /**
-     * Respostas multi-frame chegam como "014 0: 49 02 01 .. 1: .. 2: ..".
-     * Remove o tamanho e os índices "N:", junta os bytes e converte para ASCII.
-     */
-    private fun parseMode09Ascii(resp: String, tag: String): String {
-        val tokens = resp.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-        val sb = StringBuilder()
-        for ((i, t0) in tokens.withIndex()) {
-            var t = t0
-            if (i == 0 && t.length == 3 && !t.contains(":") && t.all { it.isLetterOrDigit() } && tokens.size > 1 && tokens[1].contains(":")) continue
-            val colon = t.indexOf(':')
-            if (colon >= 0) t = t.substring(colon + 1)
-            sb.append(t)
-        }
-        val hex = sb.toString().replace(" ", "").uppercase()
-        val idx = hex.indexOf(tag)
-        if (idx < 0) return ""
-        val data = hex.substring(idx + tag.length)
-        val chars = StringBuilder()
-        var i = 0
-        while (i + 2 <= data.length) {
-            val b = data.substring(i, i + 2).toIntOrNull(16) ?: break
-            if (b in 32..126) chars.append(b.toChar())
-            i += 2
-        }
-        return chars.toString()
-    }
-
-    private fun parseFuelType(resp: String): String {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("4151")
-        if (idx < 0 || c.length < idx + 6) return ""
-        return when (c.substring(idx + 4, idx + 6).toIntOrNull(16)) {
-            0x01 -> "Gasolina"
-            0x02 -> "Metanol"
-            0x03 -> "Etanol"
-            0x04 -> "Diesel"
-            0x05 -> "GLP"
-            0x06 -> "GNV"
-            0x07 -> "Propano"
-            0x08 -> "Elétrico"
-            0x09 -> "Bi-combustível (gasolina)"
-            0x0A -> "Bi-combustível (metanol)"
-            0x0B -> "Bi-combustível (etanol)"
-            0x0C -> "Bi-combustível (GLP)"
-            0x0D -> "Bi-combustível (GNV)"
-            0x0E -> "Bi-combustível (propano)"
-            0x0F -> "Bi-combustível (elétrico)"
-            0x10 -> "Bi-combustível (elétrico/combustão)"
-            0x11 -> "Híbrido (gasolina)"
-            0x12 -> "Híbrido (etanol)"
-            0x13 -> "Híbrido (diesel)"
-            0x14 -> "Híbrido (elétrico)"
-            0x15 -> "Híbrido (misto)"
-            0x16 -> "Híbrido regenerativo"
-            else -> ""
-        }
-    }
-
-    private fun parseSimpleTemp(resp: String, tag: String): Int? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf(tag)
-        if (idx < 0 || c.length < idx + 6) return null
-        return try { c.substring(idx + 4, idx + 6).toInt(16) - 40 } catch (_: Exception) { null }
-    }
-
-    private fun parseCatalystTemp(resp: String): Int? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("413C")
-        if (idx < 0 || c.length < idx + 8) return null
         return try {
-            val a = c.substring(idx + 4, idx + 6).toInt(16)
-            val b = c.substring(idx + 6, idx + 8).toInt(16)
-            (((a * 256) + b) / 10f - 40f).toInt()
-        } catch (_: Exception) { null }
-    }
-
-    /**
-     * Mode 03 – códigos de falha armazenados.
-     */
-    suspend fun readDtcs(): DtcResult = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) return@withContext DtcResult(emptyList(), false)
-
-        val status = sendCommand("0101")
-        val milOn = status.contains("41 01") || status.contains("4101") && run {
-            try {
-                val clean = cleanHex(status)
-                val idx = clean.indexOf("4101")
-                if (idx >= 0 && clean.length >= idx + 6) {
-                    val byteA = clean.substring(idx + 4, idx + 6).toInt(16)
-                    (byteA and 0x80) != 0
-                } else false
-            } catch (_: Exception) { false }
+            adapter.bondedDevices.map {
+                BluetoothDeviceItem(
+                    name = it.name ?: "Dispositivo Desconhecido",
+                    address = it.address,
+                    isBonded = true,
+                    isConnected = it.address == _connectedDevice.value?.address
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error listing paired devices: ${e.message}")
+            emptyList()
         }
-
-        val raw = sendCommand("03")
-        val codes = parseDtcResponse(raw)
-        DtcResult(codes, milOn)
     }
 
-    /**
-     * Mode 04 – limpar códigos e resetar MIL.
-     */
-    suspend fun clearDtcs(): Boolean = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) return@withContext false
-        val resp = sendCommand("04")
-        resp.contains("44") || resp.contains("OK", ignoreCase = true)
+    // ------------------------------------------------------------------------------------
+    // Conexão
+    // ------------------------------------------------------------------------------------
+
+    @SuppressLint("MissingPermission")
+    fun connectToDevice(
+        deviceItem: BluetoothDeviceItem,
+        scope: CoroutineScope,
+        profile: VehicleProfile,
+        onTelemetryUpdate: (TelemetryData) -> Unit
+    ) {
+        disconnect()
+        this.profile = profile
+        _diagnostics.value = DiagnosticsState()
+        while (diagRequests.tryReceive().isSuccess) { /* descarta pedidos antigos */ }
+        val gen = generation
+        _connectionState.value = ObdConnectionState.CONNECTING
+        addLog("Conectando a ${deviceItem.name} (${deviceItem.address})...")
+
+        pollJob = scope.launch(Dispatchers.IO) {
+            var attempts = 0
+            try {
+                while (isActive && gen == generation) {
+                    var linkLost = false
+                    try {
+                        openSocket(deviceItem)
+                        if (gen != generation) return@launch
+
+                        // Adaptador Bluetooth já conectado (como no projeto antigo); agora espera a ECU responder
+                        _connectedDevice.value = deviceItem.copy(isConnected = true)
+                        var init = initElm327()
+                        var ecuTries = 0
+                        while (init is InitResult.NoEcu && ecuTries < MAX_ECU_WAITS && isActive && gen == generation) {
+                            ecuTries++
+                            addLog("Adaptador conectado, mas a ECU não respondeu (${init.reason}).")
+                            addLog("Ligue a ignição (no híbrido, aperte Power até READY). Nova tentativa $ecuTries/$MAX_ECU_WAITS...")
+                            delay(3000)
+                            init = initElm327()
+                        }
+                        if (gen != generation) return@launch
+                        when (val result = init) {
+                            is InitResult.NoEcu -> {
+                                addLog("ECU não respondeu: ${result.reason}")
+                                _connectedDevice.value = null
+                                _connectionState.value = ObdConnectionState.ERROR
+                                return@launch
+                            }
+                            is InitResult.Ready -> {
+                                _connectionState.value = ObdConnectionState.CONNECTED
+                                addLog("ECU conectada. PIDs suportados: ${result.supported.size}")
+                                attempts = 0
+                                pollLoop(result.supported, gen, onTelemetryUpdate)
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: SecurityException) {
+                        addLog("Permissão Bluetooth negada: conceda 'Dispositivos próximos' ao app.")
+                        if (gen == generation) _connectionState.value = ObdConnectionState.ERROR
+                        return@launch
+                    } catch (e: Exception) {
+                        if (gen != generation) return@launch
+                        Log.e(TAG, "Falha/perda de conexão: ${e.message}", e)
+                        addLog("Falha: ${e.message}")
+                        linkLost = true
+                    }
+
+                    if (gen != generation) return@launch
+                    closeStreams()
+                    if (!linkLost) return@launch
+
+                    attempts++
+                    if (attempts > MAX_RECONNECTS) {
+                        addLog("Não foi possível reconectar. Verifique o adaptador.")
+                        _connectionState.value = ObdConnectionState.ERROR
+                        return@launch
+                    }
+                    _connectionState.value = ObdConnectionState.CONNECTING
+                    addLog("Reconectando ($attempts/$MAX_RECONNECTS)...")
+                    delay(2000L * attempts)
+                }
+            } finally {
+                if (gen == generation) closeStreams()
+            }
+        }
     }
-
-    /**
-     * Mode 01 PID 01 – monitores de prontidão (simplificado).
-     */
-    suspend fun readReadiness(): Map<String, String> = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) return@withContext emptyMap()
-        val resp = sendCommand("0101")
-        val map = mutableMapOf<String, String>()
-        map["MIL"] = if (resp.contains("41 01") || resp.contains("4101")) "Lido" else "Indisponível"
-        map["Raw"] = resp.take(60)
-        map
-    }
-
-    fun isConnected(): Boolean = isConnected.get()
-
-    fun getConnectionType(): ConnectionType = connectionType
 
     fun disconnect() {
-        disconnectInternal()
+        generation++
+        pollJob?.cancel()
+        pollJob = null
+        closeStreams()
+        _connectionState.value = ObdConnectionState.DISCONNECTED
+        _connectedDevice.value = null
+        _diagnostics.update { it.copy(isScanning = false) }
+        addLog("Desconectado.")
     }
 
-    private fun disconnectInternal() {
-        try { inputReader?.close() } catch (_: Exception) {}
+    private fun closeStreams() {
+        try { inputStream?.close() } catch (_: Exception) {}
         try { outputStream?.close() } catch (_: Exception) {}
-        try { bluetoothSocket?.close() } catch (_: Exception) {}
-        try { wifiSocket?.close() } catch (_: Exception) {}
-        inputReader = null
+        try { socket?.close() } catch (_: Exception) {}
+        inputStream = null
         outputStream = null
-        bluetoothSocket = null
-        wifiSocket = null
-        isConnected.set(false)
-        connectionType = ConnectionType.NONE
+        socket = null
     }
 
-    // -------------------- Parsers Mode 01 --------------------
-
-    private fun cleanHex(response: String): String {
-        return response
-            .replace("SEARCHING...", "", ignoreCase = true)
-            .replace("STOPPED", "", ignoreCase = true)
-            .replace("UNABLE TO CONNECT", "", ignoreCase = true)
-            .replace("NO DATA", "", ignoreCase = true)
-            .replace(">", "")
-            .replace("\r", "")
-            .replace("\n", "")
-            .replace(" ", "")
-            .uppercase()
-            .trim()
-    }
-
-    private fun parseRpm(resp: String): Int? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("410C")
-        if (idx < 0 || c.length < idx + 8) return null
-        return try {
-            val a = c.substring(idx + 4, idx + 6).toInt(16)
-            val b = c.substring(idx + 6, idx + 8).toInt(16)
-            ((a * 256) + b) / 4
-        } catch (_: Exception) { null }
-    }
-
-    private fun parseSpeed(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("410D")
-        if (idx < 0 || c.length < idx + 6) return null
-        return try {
-            c.substring(idx + 4, idx + 6).toInt(16).toFloat()
-        } catch (_: Exception) { null }
-    }
-
-    private fun parseTemp(resp: String): Int? {
-        val c = cleanHex(resp)
-        val idx5 = c.indexOf("4105")
-        val idxF = c.indexOf("410F")
-        val idx = when {
-            idx5 >= 0 -> idx5
-            idxF >= 0 -> idxF
-            else -> return null
+    /** Abre o socket SPP; se falhar, tenta o canal inseguro e, por fim, RFCOMM canal 1 (clones). */
+    @SuppressLint("MissingPermission")
+    private fun openSocket(deviceItem: BluetoothDeviceItem) {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        if (adapter == null || !adapter.isEnabled) {
+            throw IOException("Bluetooth não suportado ou desligado")
         }
-        if (c.length < idx + 6) return null
-        return try {
-            c.substring(idx + 4, idx + 6).toInt(16) - 40
-        } catch (_: Exception) { null }
-    }
+        // No Android 12+ cancelDiscovery() exige BLUETOOTH_SCAN (permissão removida do app).
+        // Não há busca ativa, então ignorar a falha é seguro; antes isso derrubava a conexão.
+        try { adapter.cancelDiscovery() } catch (_: SecurityException) { }
+        val device: BluetoothDevice = adapter.getRemoteDevice(deviceItem.address)
 
-    private fun parsePercent(resp: String): Int? {
-        val c = cleanHex(resp)
-        val idx4 = c.indexOf("4104")
-        val idx11 = c.indexOf("4111")
-        val idx = when {
-            idx4 >= 0 -> idx4
-            idx11 >= 0 -> idx11
-            else -> return null
+        val attempts: List<Pair<String, () -> BluetoothSocket>> = listOf(
+            "SPP seguro" to { device.createRfcommSocketToServiceRecord(SPP_UUID) },
+            "SPP inseguro" to { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
+            "RFCOMM canal 1" to {
+                device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                    .invoke(device, 1) as BluetoothSocket
+            }
+        )
+
+        var lastError: Exception? = null
+        for ((name, factory) in attempts) {
+            var attemptSocket: BluetoothSocket? = null
+            try {
+                val s = factory()
+                attemptSocket = s
+                s.connect()
+                socket = s
+                inputStream = s.inputStream
+                outputStream = s.outputStream
+                addLog("Bluetooth conectado ($name).")
+                return
+            } catch (e: SecurityException) {
+                try { attemptSocket?.close() } catch (_: Exception) {}
+                throw e
+            } catch (e: Exception) {
+                // Fecha o socket que falhou antes da próxima tentativa (senão a seguinte também falha)
+                try { attemptSocket?.close() } catch (_: Exception) {}
+                lastError = e
+                addLog("$name falhou: ${e.message}")
+            }
         }
-        if (c.length < idx + 6) return null
-        return try {
-            (c.substring(idx + 4, idx + 6).toInt(16) * 100) / 255
-        } catch (_: Exception) { null }
+        throw IOException(lastError?.message ?: "Não foi possível abrir o socket Bluetooth")
     }
 
-    private fun parseMap(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("410B")
-        if (idx < 0 || c.length < idx + 6) return null
-        return try {
-            c.substring(idx + 4, idx + 6).toInt(16).toFloat()
-        } catch (_: Exception) { null }
+    // ------------------------------------------------------------------------------------
+    // Camada ELM327
+    // ------------------------------------------------------------------------------------
+
+    /** Envia o comando e lê até o prompt '>' (ou timeout). Lança IOException se o enlace falhou. */
+    private suspend fun sendCommand(cmd: String, timeoutMs: Long = 2000, log: Boolean = verboseLog): String {
+        val out = outputStream ?: throw IOException("Sem conexão")
+        val inp = inputStream ?: throw IOException("Sem conexão")
+
+        // Descarta resíduos de respostas anteriores
+        var pending = inp.available()
+        while (pending > 0) {
+            inp.skip(pending.toLong())
+            pending = inp.available()
+        }
+
+        out.write("$cmd\r".toByteArray(Charsets.US_ASCII))
+        out.flush()
+
+        val sb = StringBuilder()
+        val buf = ByteArray(128)
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            val n = inp.available()
+            if (n > 0) {
+                val read = inp.read(buf, 0, minOf(n, buf.size))
+                if (read < 0) throw IOException("Stream fechado")
+                sb.append(String(buf, 0, read, Charsets.US_ASCII))
+                if (sb.indexOf(">") >= 0) break
+            } else {
+                delay(6)
+            }
+        }
+
+        val raw = sb.toString().replace(">", "")
+        if (raw.isBlank()) {
+            silentReplies++
+            if (silentReplies >= MAX_SILENT_REPLIES) {
+                throw LinkLostException("Adaptador parou de responder")
+            }
+        } else {
+            silentReplies = 0
+        }
+        if (log) addLog("TX: $cmd -> RX: ${raw.replace('\r', ' ').replace('\n', ' ').trim()}")
+        return raw
     }
 
-    private fun parseVoltage(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("4142")
-        if (idx < 0 || c.length < idx + 8) return null
-        return try {
-            val a = c.substring(idx + 4, idx + 6).toInt(16)
-            val b = c.substring(idx + 6, idx + 8).toInt(16)
-            ((a * 256) + b) / 1000f
-        } catch (_: Exception) { null }
+    private suspend fun initElm327(): InitResult {
+        silentReplies = 0
+        lastSeenDtcCount = -1
+        verboseLog = true
+        pidFailures.clear()
+        disabledPids.clear()
+        probeFails.clear()
+        probeConfirmed.clear()
+
+        sendCommand("ATZ", 3500)
+        delay(200)
+        sendCommand("ATE0", 1000)
+        sendCommand("ATL0", 1000)
+        sendCommand("ATS0", 1000)
+        sendCommand("ATH0", 1000)
+        sendCommand("ATAT1", 1000)
+        sendCommand("ATST64", 1000)
+        sendCommand("ATSP0", 1000)
+
+        var lastReply = ""
+        var ecuOk = false
+        for (attempt in 1..3) {
+            // A primeira consulta dispara a busca automática de protocolo (pode levar vários segundos)
+            lastReply = sendCommand("0100", 12000)
+            if (dataBytes(lastReply, "4100") != null) {
+                ecuOk = true
+                break
+            }
+            addLog("Tentativa $attempt/3 sem resposta da ECU")
+            delay(1500)
+        }
+        if (!ecuOk) {
+            return InitResult.NoEcu(lastReply.replace('\r', ' ').trim().ifBlank { "sem resposta" })
+        }
+
+        isCanProtocol = DtcParser.isCanProtocol(sendCommand("ATDPN", 1000))
+        val supported = readSupportedPids()
+
+        if (profile?.hasTurbo == true && (supported.isEmpty() || PID_BARO in supported)) {
+            // Pressão barométrica é lida uma vez; usada para converter MAP absoluto em boost
+            readPid(PID_BARO)?.let { baroKpa = it[0].toFloat() }
+        }
+        verboseLog = false  // daqui em diante, só erros e resumo periódico
+        return InitResult.Ready(supported)
     }
 
-    private fun parseEthanol(resp: String): Int? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("4152")
-        if (idx < 0 || c.length < idx + 6) return null
-        return try {
-            (c.substring(idx + 4, idx + 6).toInt(16) * 100) / 255
-        } catch (_: Exception) { null }
-    }
+    private var baroKpa = 101f
 
-    /** PID 015E — Engine fuel rate (L/h). Formula: ((A*256)+B)*0.05 */
-    private fun parseFuelRate(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("415E")
-        if (idx < 0 || c.length < idx + 8) return null
-        return try {
-            val a = c.substring(idx + 4, idx + 6).toInt(16)
-            val b = c.substring(idx + 6, idx + 8).toInt(16)
-            ((a * 256) + b) * 0.05f
-        } catch (_: Exception) { null }
-    }
+    // ---- Sistema híbrido Toyota (ECU da bateria HV) ----
+    @Volatile private var hvSocFails = 0
+    @Volatile private var hvProbeDone = false
 
-    private fun parseMaf(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("4110")
-        if (idx < 0 || c.length < idx + 8) return null
+    /**
+     * SOC da bateria HV: PID padrão 015B enviado direto, mesmo que a ECU não o anuncie na lista de
+     * PIDs suportados (o Corolla híbrido responde mesmo assim). Fórmula SAE: A * 100 / 255.
+     * Se a ECU não responder, desiste após algumas tentativas.
+     */
+    private suspend fun readToyotaHvSoc(): Float? {
+        if (hvSocFails >= HV_FAILS_TO_STOP) return null
         return try {
-            val a = c.substring(idx + 4, idx + 6).toInt(16)
-            val b = c.substring(idx + 6, idx + 8).toInt(16)
-            ((a * 256) + b) / 100f
-        } catch (_: Exception) { null }
-    }
-
-    private fun parseFuelPressure(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("410A")
-        if (idx < 0 || c.length < idx + 6) return null
-        return try {
-            c.substring(idx + 4, idx + 6).toInt(16) * 3f
-        } catch (_: Exception) { null }
-    }
-
-    private fun parseOdometer(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("41A6")
-        if (idx < 0 || c.length < idx + 12) return null
-        return try {
-            val a = c.substring(idx + 4, idx + 6).toLong(16)
-            val b = c.substring(idx + 6, idx + 8).toLong(16)
-            val cByte = c.substring(idx + 8, idx + 10).toLong(16)
-            val d = c.substring(idx + 10, idx + 12).toLong(16)
-            val raw = (a shl 24) or (b shl 16) or (cByte shl 8) or d
-            val km = raw / 10f
-            if (km in 0f..3_000_000f) km else null
-        } catch (_: Exception) { null }
-    }
-
-    private fun parseFuelLevel(resp: String): Float? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("412F")
-        if (idx < 0 || c.length < idx + 6) return null
-        return try {
-            val a = c.substring(idx + 4, idx + 6).toInt(16)
-            (a * 100f) / 255f
-        } catch (_: Exception) { null }
+            val bytes = dataBytes(sendCommand("015B", 1500), "415B")
+            if (bytes != null && bytes.isNotEmpty()) {
+                hvSocFails = 0
+                (bytes[0] * 100f / 255f).coerceIn(0f, 100f)
+            } else {
+                hvSocFails++
+                if (hvSocFails == HV_FAILS_TO_STOP) addLog("SOC híbrido (015B) sem resposta: leitura desativada nesta sessão")
+                null
+            }
+        } catch (e: Exception) {
+            hvSocFails++
+            null
+        }
     }
 
     /**
-     * Tenta ler telemetria do sistema híbrido Toyota via CAN Header 7E2 (HV Control ECU)
-     * e comando Mode 21 PID CE (Toyota Enhanced Diagnostic).
-     * Restaura sempre o cabeçalho 7DF (Broadcast) ao finalizar.
+     * Teste único por sessão: envia consultas à ECU híbrida e grava as respostas CRUAS no log.
+     * Serve para descobrir quais comandos o Corolla híbrido realmente responde.
      */
-    private suspend fun readToyotaHybridData(): Pair<Int, Float>? {
+    private suspend fun probeToyotaHybrid() {
+        if (hvProbeDone || !isCanProtocol) return
+        hvProbeDone = true
+        val was = verboseLog
+        verboseLog = true
+        addLog("=== TESTE HÍBRIDO TOYOTA: início (leva ~30 s) ===")
         try {
-            // Configura header CAN para o módulo de controle híbrido Toyota (7E2)
-            val shResp = sendCommand("ATSH7E2")
-            if (shResp.contains("ERROR")) {
-                sendCommand("ATSH7DF")
-                return null
-            }
-
-            // Mode 21 PID CE: Status da bateria de tração (SOC, corrente, tensão)
-            val raw = sendCommand("21CE")
-
-            // Restaura header padrão de broadcast OBD-II (7DF)
-            sendCommand("ATSH7DF")
-
-            val clean = cleanHex(raw)
-            val idx = clean.indexOf("61CE")
-            if (idx >= 0 && clean.length >= idx + 8) {
-                // Byte A: SOC (0-200 -> divide por 2 para 0-100%)
-                val byteA = clean.substring(idx + 4, idx + 6).toInt(16)
-                val soc = (byteA * 0.5f).toInt().coerceIn(0, 100)
-
-                // Bytes subsequentes: corrente e potência do sistema híbrido
-                var powerKw = 0f
-                if (clean.length >= idx + 12) {
-                    try {
-                        val byteB = clean.substring(idx + 6, idx + 8).toInt(16)
-                        val byteC = clean.substring(idx + 8, idx + 10).toInt(16)
-                        val rawCurrent = (byteB * 256 + byteC) - 32768
-                        val currentAmps = rawCurrent / 100f
-                        // Tensão nominal aproximada do pack HV do Corolla Hybrid ~ 207V
-                        powerKw = (207.2f * currentAmps / 1000f).coerceIn(-40f, 53f)
-                    } catch (_: Exception) {}
-                }
-                return Pair(soc, powerKw)
+            sendCommand("ATH1", 800)   // mostra QUAL ECU respondeu (7E8 motor, 7EA híbrida...)
+            sendCommand("ATS1", 800)
+            addLog("-- endereçamento funcional (7DF): tipo de combustível / etanol --")
+            for (c in listOf("0151", "0152")) sendCommand(c, 2000, true)
+            val probes = listOf(
+                "0100", "015B", "2101", "2102", "2103", "2104", "2105",
+                "2106", "2107", "2108", "2109", "2181", "21CE", "2201", "22F190"
+            )
+            for (header in listOf(HV_HEADER, "7E3", "7E0")) {
+                sendCommand("ATSH$header", 800)
+                addLog("-- header $header --")
+                for (c in probes) sendCommand(c, 2000, true)
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Hybrid read error: ${e.message}")
-            try { sendCommand("ATSH7DF") } catch (_: Exception) {}
+            addLog("Teste híbrido interrompido: ${e.message}")
+        } finally {
+            try {
+                sendCommand("ATSH7DF", 800)
+                sendCommand("ATAR", 800)
+                sendCommand("ATH0", 800)
+                sendCommand("ATS0", 800)
+            } catch (_: Exception) {}
+            addLog("=== TESTE HÍBRIDO TOYOTA: fim ===")
+            verboseLog = was
+        }
+    }
+
+    /** PIDs de sensores adicionais que estão em manômetros: lidos com prioridade (metade dos ciclos). */
+    @Volatile
+    private var priorityPids: Set<Int> = emptySet()
+
+    fun setPriorityPids(pids: Set<Int>) {
+        priorityPids = pids
+    }
+
+    /** Lê os bitmaps de PIDs suportados (0100, 0120, 0140, 0160). */
+    private suspend fun readSupportedPids(): Set<Int> {
+        val set = mutableSetOf<Int>()
+        var base = 0x00
+        while (base <= 0x60) {
+            val hex = "%02X".format(base)
+            val bytes = dataBytes(sendCommand("01$hex", 3000), "41$hex") ?: break
+            if (bytes.size < 4) break
+            for (i in 0 until 32) {
+                if (bytes[i / 8] and (0x80 shr (i % 8)) != 0) set.add(base + i + 1)
+            }
+            if ((base + 0x20) !in set) break
+            base += 0x20
+        }
+        return set
+    }
+
+    private suspend fun readPid(pid: Int): IntArray? {
+        if (pid in disabledPids) return null
+        val hex = "%02X".format(pid)
+        val bytes = dataBytes(sendCommand("01$hex", 1500), "41$hex")
+        if (bytes == null) {
+            val fails = (pidFailures[pid] ?: 0) + 1
+            pidFailures[pid] = fails
+            if (fails >= PID_FAILS_TO_DISABLE && pid !in CORE_PIDS) {
+                disabledPids.add(pid)
+                addLog("PID 01$hex sem resposta: desativado nesta sessão")
+            }
+        } else {
+            pidFailures[pid] = 0
+        }
+        return bytes
+    }
+
+    /**
+     * Sondagem de um PID Mode 01 que a ECU NÃO anuncia na lista de suportados. Vários módulos Toyota
+     * respondem a PIDs fora da lista (o 0152 e o 015B já funcionam assim neste app). Usa a mesma
+     * fórmula do sensor ([decode]); contadores próprios, sem alterar pidFailures/disabledPids.
+     * Se responder, o PID entra em [probeConfirmed] e passa a ser lido na rotina normal.
+     * Se falhar [PROBE_FAILS_TO_STOP] vezes, o sensor segue "sem leitura".
+     */
+    private suspend fun probeUndeclaredPid(pid: Int, decode: (IntArray) -> Float?): Float? {
+        val hex = "%02X".format(pid)
+        val value = dataBytes(sendCommand("01$hex", 1500), "41$hex")?.let(decode)
+        if (value != null) {
+            probeConfirmed.add(pid)
+            probeFails[pid] = 0
+            addLog("PID 01$hex não anunciado pela ECU, mas respondeu: leitura ativada")
+        } else {
+            val fails = (probeFails[pid] ?: 0) + 1
+            probeFails[pid] = fails
+            if (fails >= PROBE_FAILS_TO_STOP) {
+                addLog("PID 01$hex não anunciado e sem resposta ($fails tentativas): segue sem leitura")
+            }
+        }
+        return value
+    }
+
+    private suspend fun readBatteryVoltage(): Float? {
+        val res = sendCommand("ATRV", 1000)
+        val m = Regex("(\\d{1,2}(?:\\.\\d+)?)\\s*V", RegexOption.IGNORE_CASE).find(res)
+        return m?.groupValues?.get(1)?.toFloatOrNull()
+    }
+
+    private suspend fun readCustomSoc(q: CustomPidQuery): Float? {
+        return try {
+            sendCommand("ATSH${q.header}", 800)
+            val res = sendCommand(q.request, 2500)
+            val bytes = dataBytes(res, q.responsePrefix)
+            bytes?.getOrNull(q.byteIndex)?.let { (it * q.multiplier / q.divisor).coerceIn(0f, 100f) }
+        } finally {
+            sendCommand("ATSH7DF", 800) // volta ao endereçamento funcional (CAN 11 bits)
+        }
+    }
+
+    /**
+     * Detecta se o perfil do veículo corresponde a um híbrido Toyota (Corolla, Corolla Cross, RAV4, Prius, etc.).
+     */
+    private fun isToyotaHybrid(prof: VehicleProfile): Boolean {
+        val isToyota = prof.brand.contains("Toyota", ignoreCase = true) ||
+            prof.name.contains("Toyota", ignoreCase = true) ||
+            prof.model.contains("Corolla", ignoreCase = true) ||
+            prof.model.contains("Yaris", ignoreCase = true) ||
+            prof.model.contains("Prius", ignoreCase = true) ||
+            prof.model.contains("RAV4", ignoreCase = true)
+        return isToyota && prof.isHybrid
+    }
+
+    /**
+     * Leitura de combustível proprietária Toyota via Combination Meter (header 7C0):
+     * 1. Troca o header para 7C0 (painel de instrumentos da Toyota)
+     * 2. Tenta PID 2129 (Mode 21 PID 29 - padrão nos Corolla / RAV4 / Camry / Prius Hybrid)
+     * 3. Se não responder, tenta Mode 22 PID 1022 (221022)
+     * 4. Interpreta a resposta (byte A):
+     *    - No Combination Meter da Toyota (PID 2129), o valor A vem em unidades de 0.5 Litro (A/2 L).
+     *      Exemplo: A = 86 -> 43 L (100% de um tanque de 43 L).
+     *    - Se A/2 exceder significativamente a capacidade do tanque, interpreta como escala normalizada 0..255 (A*100/255).
+     * 5. Restaura sempre o header funcional padrão 7DF ao final.
+     */
+    private suspend fun readToyotaCustomFuel(prof: VehicleProfile): Float? {
+        if (!isCanProtocol) return null
+        return try {
+            // 1. Troca o header para 7C0 (Combination Meter)
+            sendCommand("ATSH$CUSTOM_FUEL_HEADER", 800)
+
+            // 2. Tenta Mode 21 PID 29
+            var res = sendCommand(CUSTOM_FUEL_PID, 2000)
+            var bytes = dataBytes(res, CUSTOM_FUEL_RESPONSE)
+
+            // 3. Fallback: Mode 22 PID 1022
+            if (bytes == null || bytes.isEmpty()) {
+                res = sendCommand(CUSTOM_FUEL_PID_ALT, 2000)
+                bytes = dataBytes(res, CUSTOM_FUEL_RESPONSE_ALT)
+            }
+
+            if (bytes != null && bytes.isNotEmpty()) {
+                val a = bytes[0]
+                val tankCap = prof.tankCapacityLiters.toFloat().takeIf { it > 10f } ?: 43f
+
+                val halfLiters = a * 0.5f
+                val percent = if (halfLiters <= tankCap * 1.15f) {
+                    // Valor em meio-litros (A/2 L)
+                    (halfLiters / tankCap * 100f).coerceIn(0f, 100f)
+                } else {
+                    // Valor em escala percentual 0..255
+                    (a * 100f / 255f).coerceIn(0f, 100f)
+                }
+                addLog("Leitura de combustível Toyota (header 7C0): raw=$a, ~${"%.1f".format(halfLiters)}L (${percent.toInt()}%)")
+                percent
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            addLog("Aviso: falha na leitura de combustível Toyota 7C0: ${e.message}")
+            null
+        } finally {
+            try {
+                sendCommand("ATSH7DF", 800) // restaura endereçamento funcional CAN
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Extrai os bytes de dados que seguem [prefix] (ex.: "410D"). Considera cada linha da resposta
+     * (com várias ECUs há várias linhas) e ignora ruído como SEARCHING... / NO DATA.
+     */
+    private fun dataBytes(res: String, prefix: String): IntArray? {
+        for (line in res.split('\r', '\n')) {
+            val l = line.replace(" ", "").uppercase()
+            val idx = l.indexOf(prefix.uppercase())
+            if (idx < 0) continue
+            val hex = l.substring(idx + prefix.length).takeWhile { it in '0'..'9' || it in 'A'..'F' }
+            if (hex.length < 2) continue
+            val out = IntArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16) }
+            return out
         }
         return null
     }
 
-    /** SAE J1979 Mode 01 PID 5B: vida restante do pack híbrido = A * 100 / 255 (%). */
-    private fun parseHybridPackLife(resp: String): Int? {
-        val c = cleanHex(resp)
-        val idx = c.indexOf("415B")
-        if (idx < 0 || c.length < idx + 6) return null
-        return try {
-            (c.substring(idx + 4, idx + 6).toInt(16) * 100) / 255
-        } catch (_: Exception) { null }
+    // ------------------------------------------------------------------------------------
+    // Loop de leitura
+    // ------------------------------------------------------------------------------------
+
+    // ------------------------------------------------------------------------------------
+    // Diagnóstico: modos 03 (armazenados), 07 (pendentes), 0A (permanentes), 04 (apagar)
+    // ------------------------------------------------------------------------------------
+
+    private fun looksLikeBusError(raw: String): Boolean {
+        val u = raw.uppercase()
+        return u.contains("UNABLE") || u.contains("BUS") || u.contains("ERROR") ||
+            u.contains("STOPPED") || u.contains("?") || u.isBlank()
     }
 
-    /**
-     * Decodifica a resposta de 01 00/20/40/60/80/A0 em lista de PIDs suportados.
-     * base = 0x00, 0x20, ...
-     */
-    private fun decodeSupportedPids(resp: String, base: Int): List<Int> {
-        val c = cleanHex(resp)
-        val tag = "41" + String.format("%02X", base)
-        val idx = c.indexOf(tag)
-        if (idx < 0 || c.length < idx + 4 + 8) return emptyList()
-        return try {
-            val mask = c.substring(idx + 4, idx + 12).toLong(16)
-            (1..32).filter { bit -> (mask shr (32 - bit)) and 1L == 1L }.map { base + it }
-        } catch (_: Exception) { emptyList() }
-    }
-
-    /**
-     * Varredura SOMENTE LEITURA para descobrir o que o híbrido responde.
-     * Envia apenas Mode 01 / 21 / 22 (leitura). Usa ATH1 para mostrar QUAL ECU respondeu
-     * (7E8 = motor, 7EA = ECU híbrida, 7EB = bateria HV, etc.).
-     * Compartilhe o relatório para mapear os PIDs reais do Corolla 2026.
-     */
-    suspend fun probeHybrid(onLine: (String) -> Unit) = withContext(Dispatchers.IO) {
-        if (!isConnected.get()) { onLine("Não conectado."); return@withContext }
-        onLine("== VARREDURA HÍBRIDO (somente leitura) ==")
-        onLine("Protocolo: $detectedProtocol | ECU respondendo: $ecuResponding")
-        sendCommand("ATH1")
-        sendCommand("ATS1")
+    private suspend fun scanDtcs(clearedMessage: String? = null) {
+        verboseLog = true
         try {
-            // 1) PIDs padrão suportados
-            var all = emptyList<Int>()
-            for (base in listOf(0x00, 0x20, 0x40, 0x60, 0x80, 0xA0)) {
-                val cmd = "01" + String.format("%02X", base)
-                val r = sendCommand(cmd, 6000L)
-                onLine("$cmd -> $r")
-                val list = decodeSupportedPids(r, base)
-                all = all + list
-                if (!list.contains(base + 0x20)) break
-            }
-            onLine("PIDs Mode 01 suportados: " + all.joinToString(" ") { String.format("%02X", it) })
-            onLine("01 5B (bateria HV padrão): " + (if (all.contains(0x5B)) "SUPORTADO" else "não suportado"))
-            onLine("015B -> " + sendCommand("015B"))
+            val status = DtcParser.parseMonitorStatus(sendCommand("0101", 3000))
+            val rawStored = sendCommand("03", 6000)
+            val rawPending = sendCommand("07", 6000)
+            val rawPermanent = sendCommand("0A", 6000)
+            verboseLog = false
 
-            // 2) Sondagem dos módulos híbridos Toyota (leitura Mode 21 / 22)
-            val headers = listOf("7E2", "7E3", "7E0")
-            val probes = listOf("2101", "2102", "2103", "2104", "2105", "2106", "2107", "2108", "2109", "2181", "21CE", "2201", "22F190")
-            for (h in headers) {
-                val sh = sendCommand("ATSH$h")
-                onLine("-- header $h ($sh) --")
-                onLine("0100 -> " + sendCommand("0100", 4000L))
-                for (cmd in probes) {
-                    val r = sendCommand(cmd, 3000L)
-                    if (r.isNotBlank() && !r.contains("NO DATA", true)) onLine("$cmd -> $r")
+            val storedOk = DtcParser.hasValidResponse(rawStored, "43") || rawStored.uppercase().contains("NO DATA")
+            if (!storedOk && looksLikeBusError(rawStored)) {
+                _diagnostics.update {
+                    it.copy(isScanning = false, message = "Falha ao ler os códigos. Confira a ignição e a conexão e tente de novo.")
+                }
+                return
+            }
+
+            val stored = DtcParser.decodeDtcs(rawStored, "43", isCanProtocol)
+            val pending = DtcParser.decodeDtcs(rawPending, "47", isCanProtocol)
+            val permanent = DtcParser.decodeDtcs(rawPermanent, "4A", isCanProtocol)
+
+            _diagnostics.update {
+                it.copy(
+                    milOn = status?.first ?: it.milOn,
+                    reportedCount = status?.second ?: it.reportedCount,
+                    stored = stored.map { c -> dtcEntryOf(c, DtcKind.STORED) },
+                    pending = pending.map { c -> dtcEntryOf(c, DtcKind.PENDING) },
+                    permanent = permanent.map { c -> dtcEntryOf(c, DtcKind.PERMANENT) },
+                    isScanning = false,
+                    lastScanMs = System.currentTimeMillis(),
+                    message = clearedMessage
+                )
+            }
+            if (status != null) lastSeenDtcCount = status.second
+            addLog("Diagnóstico: ${stored.size} armazenado(s), ${pending.size} pendente(s), ${permanent.size} permanente(s)")
+        } catch (e: IOException) {
+            verboseLog = false
+            _diagnostics.update { it.copy(isScanning = false, message = "Conexão perdida durante a leitura.") }
+            throw e
+        }
+    }
+
+    private suspend fun clearDtcs() {
+        verboseLog = true
+        try {
+            val raw = sendCommand("04", 6000)
+            verboseLog = false
+            if (DtcParser.hasValidResponse(raw, "44")) {
+                scanDtcs(clearedMessage = "Códigos apagados. Se o problema persistir, a luz volta a acender.")
+            } else {
+                _diagnostics.update {
+                    it.copy(
+                        isScanning = false,
+                        message = "A ECU não aceitou apagar os códigos. Deixe a ignição ligada (motor desligado) e tente de novo."
+                    )
                 }
             }
-        } finally {
-            sendCommand("ATSH7DF")
-            sendCommand("ATAR")
-            sendCommand("ATH0")
-            sendCommand("ATS0")
+        } catch (e: IOException) {
+            verboseLog = false
+            _diagnostics.update { it.copy(isScanning = false, message = "Conexão perdida ao apagar os códigos.") }
+            throw e
         }
-        onLine("== FIM DA VARREDURA ==")
     }
 
-    private fun parseDtcResponse(raw: String): List<String> {
-        val clean = cleanHex(raw)
-        // Procura 43XX...
-        val idx = clean.indexOf("43")
-        if (idx < 0) return emptyList()
+    private fun blankTelemetry() = TelemetryData(
+        speedKmh = 0f, avgSpeedKmh = 0f, rpm = 0f,
+        fuelLevelPercent = 0f, batteryVoltage = 0f,
+        coolantTempC = Float.NaN, oilTempC = Float.NaN,
+        turboPressureKpa = 0f, engineLoadPercent = 0f, throttlePercent = 0f,
+        lateralGForce = 0f,
+        instantConsumptionKmPerL = 0f, avgConsumptionKmPerL = 0f,
+        autonomyKm = 0, elapsedTimeSeconds = 0L,
+        isEngineRunning = false, isEvMode = false,
+        ethanolPercent = Float.NaN,
+        hybridBatterySocPercent = 0f, hybridSocAvailable = false,
+        hybridBatteryVoltageVolts = 0f, hybridBatteryCurrentAmps = 0f,
+        hybridBatteryTempC = 0f, icePowerKw = 0f,
+        electricMotorPowerKw = 0f, generatorPowerKw = 0f,
+        hybridDetailAvailable = false,
+        ecuLinkOk = false, fuelLevelAvailable = false
+    )
 
-        var payload = clean.substring(idx + 2)
-        // Em CAN (ISO 15765-4) a resposta traz um byte com a quantidade de DTCs depois do 43.
-        if ((payload.length / 2) % 2 == 1) payload = payload.substring(2)
+    private suspend fun CoroutineScope.pollLoop(
+        supported: Set<Int>,
+        gen: Int,
+        onTelemetryUpdate: (TelemetryData) -> Unit
+    ) {
+        fun usable(pid: Int) = pid !in disabledPids && (supported.isEmpty() || pid in supported)
 
-        val codes = mutableListOf<String>()
-        var i = 0
-        while (i + 4 <= payload.length) {
-            val b1 = payload.substring(i, i + 2).toIntOrNull(16) ?: break
-            val b2 = payload.substring(i + 2, i + 4).toIntOrNull(16) ?: break
-            if (b1 == 0 && b2 == 0) break
+        var t = blankTelemetry()
+        val startNs = System.nanoTime()
+        var lastSampleNs = startNs
+        var speedTotal = 0f
+        var speedCount = 0
+        var distanceKm = 0.0
+        var fuelUsedL = 0.0
+        var instantEma = 0f
+        var cycle = 0
+        // Confiabilidade: instante da última resposta da ECU e das leituras lentas
+        val linkTimeoutNs = 4_000_000_000L
+        val slowStaleNs = 20_000_000_000L
+        var lastCoreOkNs = startNs
+        var lastLinkOk = true
+        val slowOkNs = HashMap<Int, Long>()
+        // Sensores adicionais (SensorRegistry): 1 por ciclo, só os que a ECU declarou suportar
+        val extraStaleNs = 40_000_000_000L
+        val extraValues = HashMap<String, Float>()
+        val extraOkNs = HashMap<String, Long>()
+        var extraIdx = 0
+        var priorityIdx = 0
+        var probeIdx = 0
+        var lastSummaryNs = startNs
+        var cyclesSinceSummary = 0
 
-            val firstChar = when (b1 shr 6) {
-                0 -> 'P'
-                1 -> 'C'
-                2 -> 'B'
-                else -> 'U'
+        val supportedExtras = SensorRegistry.standard.count { usable(it.pid) }
+        addLog("Sensores adicionais suportados pela ECU: $supportedExtras de ${SensorRegistry.standard.size}")
+        profile?.let { if (isToyotaHybrid(it)) probeToyotaHybrid() }
+
+        while (isActive && gen == generation) {
+            val prof = profile ?: break
+
+            // ---------- Pedidos de diagnóstico (leitura/apagamento de códigos) ----------
+            while (true) {
+                val req = diagRequests.tryReceive().getOrNull() ?: break
+                when (req) {
+                    DiagRequest.SCAN -> scanDtcs()
+                    DiagRequest.CLEAR -> clearDtcs()
+                }
             }
-            // Formato correto: letra + 2º dígito (bits 5-4) + nibble baixo hex + byte 2 em hex
-            val code = "$firstChar${(b1 shr 4) and 0x3}${String.format("%X", b1 and 0x0F)}${String.format("%02X", b2)}"
-            codes.add(code)
-            i += 4
-            if (codes.size >= 16) break
+
+            // ---------- PIDs rápidos ----------
+            val speedBytes = readPid(PID_SPEED)?.takeIf { it.isNotEmpty() }
+            val rpmBytes = readPid(PID_RPM)?.takeIf { it.size >= 2 }
+            if (speedBytes != null || rpmBytes != null) lastCoreOkNs = System.nanoTime()
+            val linkOk = System.nanoTime() - lastCoreOkNs < linkTimeoutNs
+            if (linkOk != lastLinkOk) {
+                lastLinkOk = linkOk
+                addLog(if (linkOk) "ECU voltou a responder" else "ECU sem resposta: leituras marcadas como indisponíveis")
+            }
+            // Sem resposta da ECU não se reaproveita o valor antigo como se fosse atual
+            val speed = if (!linkOk) 0f else (speedBytes?.get(0)?.toFloat() ?: t.speedKmh)
+            val rpm = if (!linkOk) 0f else (rpmBytes?.let { (it[0] * 256 + it[1]) / 4f } ?: t.rpm)
+            val tps = if (!linkOk) 0f else if (usable(PID_TPS)) {
+                readPid(PID_TPS)?.let { it[0] * 100f / 255f } ?: t.throttlePercent
+            } else t.throttlePercent
+
+            // Vazão de combustível (L/h): 015E direto, ou calculada pelo MAF (0110)
+            val ethFrac = if (!t.ethanolPercent.isNaN()) t.ethanolPercent / 100f else DEFAULT_ETHANOL_FRACTION
+            var realFlowLph: Float? = null
+            val hasFlowSource = usable(PID_FUEL_RATE) || usable(PID_MAF)
+            if (usable(PID_FUEL_RATE)) {
+                readPid(PID_FUEL_RATE)?.takeIf { it.size >= 2 }?.let {
+                    realFlowLph = (it[0] * 256 + it[1]) / 20f
+                }
+            } else if (usable(PID_MAF)) {
+                readPid(PID_MAF)?.takeIf { it.size >= 2 }?.let {
+                    val mafGs = (it[0] * 256 + it[1]) / 100f
+                    val afr = 14.7f * (1f - ethFrac) + 9.0f * ethFrac
+                    val densityGperL = 745f * (1f - ethFrac) + 789f * ethFrac
+                    realFlowLph = mafGs * 3600f / (afr * densityGperL)
+                }
+            }
+
+            // ---------- PIDs lentos (1 por ciclo, em rotação) ----------
+            var coolant = t.coolantTempC
+            var fuel = t.fuelLevelPercent
+            var load = t.engineLoadPercent
+            var batt = t.batteryVoltage
+            var oil = t.oilTempC
+            var ethanol = t.ethanolPercent
+            var soc = if (t.hybridSocAvailable) t.hybridBatterySocPercent else Float.NaN
+            var turbo = t.turboPressureKpa
+
+            val slowTasks = buildList {
+                add(PID_STATUS) // luz de injeção (MIL) + quantidade de códigos
+                if (usable(PID_COOLANT)) add(PID_COOLANT)
+                if (usable(PID_FUEL_LEVEL) || isToyotaHybrid(prof)) add(PID_FUEL_LEVEL)
+                add(-1) // tensão da bateria 12 V (ATRV)
+                if (usable(PID_ENGINE_LOAD)) add(PID_ENGINE_LOAD)
+                if (usable(PID_OIL_TEMP) || PID_OIL_TEMP in probeConfirmed) add(PID_OIL_TEMP)
+                if (PID_ETHANOL !in disabledPids) add(PID_ETHANOL) // tenta 0152 direto, mesmo fora da lista anunciada
+                if (usable(PID_HYBRID_BATT) || prof.socQuery != null ||
+                    (prof.isHybrid && hvSocFails < HV_FAILS_TO_STOP)) add(PID_HYBRID_BATT)
+                if (prof.hasTurbo && usable(PID_MAP)) add(PID_MAP)
+            }
+            if (slowTasks.isNotEmpty()) {
+                when (val task = slowTasks[cycle % slowTasks.size]) {
+                    PID_STATUS -> readPid(task)?.let { b ->
+                        val mil = (b[0] and 0x80) != 0
+                        val count = b[0] and 0x7F
+                        _diagnostics.update { it.copy(milOn = mil, reportedCount = count) }
+                        // Mudou a quantidade de códigos: lê automaticamente para avisar o usuário
+                        if (count != lastSeenDtcCount) {
+                            val firstReadClean = lastSeenDtcCount < 0 && count == 0 && !mil
+                            lastSeenDtcCount = count
+                            if (!firstReadClean) diagRequests.trySend(DiagRequest.SCAN)
+                        }
+                    }
+                    PID_COOLANT -> readPid(task)?.let { coolant = (it[0] - 40).toFloat(); slowOkNs[task] = System.nanoTime() }
+                    PID_FUEL_LEVEL -> {
+                        var f: Float? = null
+                        if (isToyotaHybrid(prof)) {
+                            // 1. Nos híbridos Toyota, o PID padrão 012F muitas vezes não responde ou retorna valor fixo.
+                            // Lê prioritariamente o módulo do painel (header 7C0) com ATSH7C0 e PIDs 2129 / 221022.
+                            f = readToyotaCustomFuel(prof)
+                            // 2. Fallback caso a ECU do painel não responda
+                            if (f == null && usable(PID_FUEL_LEVEL)) {
+                                f = readPid(task)?.let { it[0] * 100f / 255f }
+                            }
+                        } else {
+                            // Demais veículos: lê PID padrão 012F
+                            if (usable(PID_FUEL_LEVEL)) {
+                                f = readPid(task)?.let { it[0] * 100f / 255f }
+                            }
+                            // Fallback para modelos Toyota que também utilizam painel no header 7C0
+                            if (f == null && isCanProtocol && prof.brand.contains("Toyota", ignoreCase = true)) {
+                                f = readToyotaCustomFuel(prof)
+                            }
+                        }
+
+                        if (f != null && !f.isNaN()) {
+                            fuel = f.coerceIn(0f, 100f)
+                            slowOkNs[task] = System.nanoTime()
+                        }
+                    }
+                    -1 -> readBatteryVoltage()?.let { batt = it; slowOkNs[task] = System.nanoTime() }
+                    PID_ENGINE_LOAD -> readPid(task)?.let { load = it[0] * 100f / 255f; slowOkNs[task] = System.nanoTime() }
+                    PID_OIL_TEMP -> readPid(task)?.let { oil = (it[0] - 40).toFloat(); slowOkNs[task] = System.nanoTime() }
+                    PID_ETHANOL -> readPid(task)?.let { ethanol = it[0] * 100f / 255f; slowOkNs[task] = System.nanoTime() }
+                    PID_HYBRID_BATT -> {
+                        val v = if (usable(PID_HYBRID_BATT)) {
+                            readPid(task)?.let { it[0] * 100f / 255f }
+                        } else if (prof.socQuery != null) {
+                            prof.socQuery?.let { readCustomSoc(it) }
+                        } else if (prof.isHybrid) {
+                            readToyotaHvSoc()
+                        } else null
+                        if (v != null) soc = v
+                    }
+                    PID_MAP -> readPid(task)?.let { turbo = (it[0] - baroKpa).coerceAtLeast(0f) }
+                }
+            }
+
+            // ---------- Sensores adicionais (1 por ciclo, em rotação) ----------
+            if (linkOk && supported.isNotEmpty()) {
+                val eligible = SensorRegistry.standard.filter { usable(it.pid) || (it.pid in probeConfirmed && it.pid !in disabledPids) }
+                val wanted = priorityPids
+                val priority = if (wanted.isEmpty()) emptyList() else eligible.filter { it.pid in wanted }
+                if (eligible.isNotEmpty()) {
+                    // Sensores que estão em manômetros ocupam ciclos alternados; os demais seguem em rotação
+                    val def = if (priority.isNotEmpty() && cycle % 2 == 0) {
+                        priority[priorityIdx++ % priority.size]
+                    } else {
+                        eligible[extraIdx++ % eligible.size]
+                    }
+                    readPid(def.pid)?.let { bytes ->
+                        def.decode(bytes)?.let { v ->
+                            extraValues[def.id] = v
+                            extraOkNs[def.id] = System.nanoTime()
+                        }
+                    }
+                }
+            }
+
+            // ---------- Sondagem de PIDs não anunciados pela ECU (1 a cada 3 ciclos) ----------
+            // Só atua em sensores que hoje ficam "sem leitura" (PID fora da lista de suportados).
+            // Sensores já declarados pela ECU seguem exatamente a rotina acima, sem alteração.
+            if (linkOk && supported.isNotEmpty() && cycle % PROBE_EVERY_N_CYCLES == 1) {
+                val candidates = (SensorRegistry.standard.map { it.pid } + PID_OIL_TEMP).distinct().filter { pid ->
+                    !usable(pid) && pid !in disabledPids && pid !in probeConfirmed &&
+                        (probeFails[pid] ?: 0) < PROBE_FAILS_TO_STOP
+                }
+                if (candidates.isNotEmpty()) {
+                    val pid = candidates[probeIdx++ % candidates.size]
+                    if (pid == PID_OIL_TEMP) {
+                        probeUndeclaredPid(pid) { b -> if (b.isEmpty()) null else b[0] - 40f }?.let { v ->
+                            oil = v
+                            slowOkNs[PID_OIL_TEMP] = System.nanoTime()
+                        }
+                    } else {
+                        SensorRegistry.standard.firstOrNull { it.pid == pid }?.let { def ->
+                            probeUndeclaredPid(pid, def.decode)?.let { v ->
+                                extraValues[def.id] = v
+                                extraOkNs[def.id] = System.nanoTime()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------- Médias e tempo ----------
+            val nowNs = System.nanoTime()
+            val dtSec = ((nowNs - lastSampleNs) / 1_000_000_000.0).coerceIn(0.0, 2.0)
+            lastSampleNs = nowNs
+
+            if (speed > 0) {
+                speedTotal += speed
+                speedCount++
+            }
+            val avgSpeed = if (speedCount > 0) speedTotal / speedCount else 0f
+
+            // ---------- Modo de condução / fluxo híbrido ----------
+            val driveMode = when {
+                prof.isHybrid && rpm < 400 && speed < 45 -> DriveMode.ECO
+                load > 70f || rpm > 3200f || tps > 65f -> DriveMode.SPORT
+                load < 35f && speed < 65f -> DriveMode.ECO
+                else -> DriveMode.NORMAL
+            }
+            val hybridFlow = when {
+                prof.isHybrid && tps < 3f && speed > 5f -> HybridEnergyFlowState.REGEN_BRAKING
+                prof.isHybrid && rpm < 400 && speed > 0 -> HybridEnergyFlowState.EV_DRIVE
+                rpm > 400 && speed > 0 -> HybridEnergyFlowState.HYBRID_DRIVE
+                speed == 0f && rpm > 400 -> HybridEnergyFlowState.ENGINE_CHARGING
+                else -> HybridEnergyFlowState.IDLE
+            }
+
+            // ---------- Consumo ----------
+            val inmetroKmL = when (driveMode) {
+                DriveMode.ECO -> prof.inmetroUrbanKmPerL.toFloat()
+                DriveMode.NORMAL -> prof.inmetroAvgKmPerL.toFloat()
+                DriveMode.SPORT -> (prof.inmetroRoadKmPerL * 0.8).toFloat()
+            }
+            // Sem vazão real, estima pela tabela INMETRO (e a UI avisa com "~")
+            val estimated = !hasFlowSource
+            val flowLph: Float? = when {
+                !estimated -> realFlowLph
+                speed > 0f -> speed / inmetroKmL
+                else -> 0f
+            }
+            if (flowLph != null) {
+                distanceKm += speed * dtSec / 3600.0
+                fuelUsedL += flowLph * dtSec / 3600.0
+            }
+            val instantRaw = when {
+                speed < 3f -> 0f
+                flowLph == null -> instantEma
+                flowLph > 0.1f -> (speed / flowLph).coerceAtMost(99.9f)
+                else -> 99.9f // motor desligado em movimento (EV / corte de injeção)
+            }
+            instantEma = if (instantRaw == 0f) 0f else instantEma + (instantRaw - instantEma) * 0.35f
+            val avgKmL = if (distanceKm >= 0.3 && fuelUsedL > 0.01) (distanceKm / fuelUsedL).toFloat() else 0f
+
+            // ---------- Autonomia & Combustível ----------
+            val effectiveTankCapacity = if (prof.tankCapacityLiters > 0.0) prof.tankCapacityLiters else 50.0
+            val tankLitres = effectiveTankCapacity * (fuel / 100.0)
+            val rangeKmL = if (avgKmL > 0f && distanceKm >= 2.0) avgKmL else inmetroKmL
+            val autonomy = (tankLitres * rangeKmL).toInt()
+
+            fun fresh(key: Int): Boolean = slowOkNs[key]?.let { nowNs - it < slowStaleNs } ?: false
+            val fuelAvailable = linkOk && fresh(PID_FUEL_LEVEL)
+            val usingMeasuredAvg = avgKmL > 0f && distanceKm >= 2.0
+
+            // Só entram sensores com leitura recente; os demais ficam fora do mapa (UI mostra "--")
+            val sensorSnapshot = HashMap<String, Float>()
+            if (linkOk) {
+                for ((id, v) in extraValues) {
+                    val okNs = extraOkNs[id]
+                    if (okNs != null && nowNs - okNs < extraStaleNs) sensorSnapshot[id] = v
+                }
+                // AFR é CALCULADO: lambda real x AFR estequiométrico da mistura (gasolina/etanol)
+                val lambda = sensorSnapshot["o2_wr_b1s1_lambda"] ?: sensorSnapshot["cmd_equiv_ratio"]
+                if (lambda != null) {
+                    sensorSnapshot[SensorRegistry.AFR_ID] = lambda * (14.7f * (1f - ethFrac) + 9.0f * ethFrac)
+                }
+            }
+
+            t = t.copy(
+                speedKmh = speed,
+                avgSpeedKmh = avgSpeed,
+                rpm = rpm,
+                coolantTempC = if (linkOk && fresh(PID_COOLANT)) coolant else Float.NaN,
+                oilTempC = if (linkOk && fresh(PID_OIL_TEMP)) oil else Float.NaN,
+                fuelLevelPercent = fuel,
+                engineLoadPercent = if (linkOk && fresh(PID_ENGINE_LOAD)) load else 0f,
+                throttlePercent = tps,
+                batteryVoltage = if (fresh(-1)) batt else 0f,
+                turboPressureKpa = turbo,
+                ethanolPercent = if (linkOk && fresh(PID_ETHANOL)) ethanol else Float.NaN,
+                driveMode = driveMode,
+                hybridFlowState = hybridFlow,
+                instantConsumptionKmPerL = instantEma,
+                avgConsumptionKmPerL = avgKmL,
+                consumptionIsEstimated = estimated,
+                autonomyKm = autonomy,
+                elapsedTimeSeconds = (nowNs - startNs) / 1_000_000_000L,
+                isEngineRunning = rpm > 300,
+                isEvMode = prof.isHybrid && rpm < 300,
+                hybridBatterySocPercent = if (soc.isNaN()) 0f else soc,
+                hybridSocAvailable = !soc.isNaN() && linkOk,
+                hybridDetailAvailable = false,
+                ecuLinkOk = linkOk,
+                fuelLevelAvailable = fuelAvailable,
+                fuelLiters = if (fuelAvailable) (effectiveTankCapacity * (fuel / 100.0)).toFloat() else Float.NaN,
+                autonomyIsEstimated = !usingMeasuredAvg,
+                sensors = sensorSnapshot
+            )
+
+            withContext(Dispatchers.Main) { onTelemetryUpdate(t) }
+
+            // Resumo periódico no terminal de diagnóstico (a cada ~10 s)
+            cycle++
+            cyclesSinceSummary++
+            if (nowNs - lastSummaryNs > 10_000_000_000L) {
+                val hz = cyclesSinceSummary / ((nowNs - lastSummaryNs) / 1e9)
+                addLog("Leitura OK: %.1f ciclos/s | vel %.0f km/h | rpm %.0f".format(hz, speed, rpm))
+                lastSummaryNs = nowNs
+                cyclesSinceSummary = 0
+            }
+            delay(20)
         }
-        return codes
     }
 }

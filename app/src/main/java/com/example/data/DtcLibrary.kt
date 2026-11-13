@@ -83,17 +83,23 @@ object DtcLibrary {
         "P0AA6" to DtcInfo("Isolamento HV", "Falha de isolamento do sistema de alta tensão.", "Híbrido", DTCLevel.CRITICAL),
         "P0AFA" to DtcInfo("Bateria HV Baixa", "Tensão baixa do pacote de bateria híbrida.", "Híbrido", DTCLevel.WARNING),
         "P3000" to DtcInfo("Controle HV", "Mau funcionamento do sistema de controle da bateria HV.", "Híbrido", DTCLevel.CRITICAL),
-        "P3004" to DtcInfo("Bateria HV", "Alta tensão do pacote de bateria híbrida.", "Híbrido", DTCLevel.WARNING),
-        "P3011" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 1.", "Híbrido"),
-        "P3012" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 2.", "Híbrido"),
-        "P3013" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 3.", "Híbrido"),
-        "P3014" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 4.", "Híbrido"),
-        "P3015" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 5.", "Híbrido"),
-        "P3016" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 6.", "Híbrido"),
-        "P3017" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 7.", "Híbrido"),
-        "P3018" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 8.", "Híbrido"),
-        "P3019" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 9.", "Híbrido"),
-        "P3020" to DtcInfo("Bloco Bateria HV", "Resistência alta no bloco de bateria 10.", "Híbrido"),
+        "P3004" to DtcInfo("Fonte de Alta Tensão HV", "Circuito da fonte de alta tensão (High Voltage Power Resource) com mau funcionamento.", "Híbrido", DTCLevel.CRITICAL, "Interlock de segurança HV, fusível, conectores do sistema híbrido", "Diagnóstico em concessionária (sistema de alta tensão)"),
+        "P3006" to DtcInfo("Bateria HV Desbalanceada", "Estado de carga (SOC) desigual entre os blocos da bateria híbrida.", "Híbrido", DTCLevel.WARNING, "Blocos da bateria HV degradados ou desbalanceados", "Diagnóstico da bateria HV em concessionária"),
+                                                                                
+        "P3011" to DtcInfo("Bloco Bateria HV", "Bloco 1 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3012" to DtcInfo("Bloco Bateria HV", "Bloco 2 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3013" to DtcInfo("Bloco Bateria HV", "Bloco 3 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3014" to DtcInfo("Bloco Bateria HV", "Bloco 4 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3015" to DtcInfo("Bloco Bateria HV", "Bloco 5 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3016" to DtcInfo("Bloco Bateria HV", "Bloco 6 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3017" to DtcInfo("Bloco Bateria HV", "Bloco 7 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3018" to DtcInfo("Bloco Bateria HV", "Bloco 8 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3019" to DtcInfo("Bloco Bateria HV", "Bloco 9 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3020" to DtcInfo("Bloco Bateria HV", "Bloco 10 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3021" to DtcInfo("Bloco Bateria HV", "Bloco 11 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3022" to DtcInfo("Bloco Bateria HV", "Bloco 12 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3023" to DtcInfo("Bloco Bateria HV", "Bloco 13 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
+        "P3024" to DtcInfo("Bloco Bateria HV", "Bloco 14 da bateria híbrida está fraco (desbalanceado em relação aos demais).", "Híbrido", DTCLevel.WARNING, "Célula/bloco degradado", "Teste individual dos blocos da bateria HV"),
 
         // ---- Transmissão ----
         "P0700" to DtcInfo("Transmissão", "Sistema de controle da transmissão com mau funcionamento.", "Powertrain", DTCLevel.WARNING),
@@ -160,6 +166,8 @@ object DtcLibrary {
             else -> DtcInfo("Código de Diagnóstico", "Código $normalized detectado. Consulte o manual do veículo para detalhes específicos.", "Desconhecido", DTCLevel.INFO)
         }
     }
+
+    fun isKnown(code: String): Boolean = library.containsKey(code.trim().uppercase())
 
     fun allCodes(): List<String> = library.keys.sorted()
     fun count(): Int = library.size

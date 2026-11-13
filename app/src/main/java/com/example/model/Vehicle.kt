@@ -1,5 +1,7 @@
 package com.example.model
 
+import com.example.data.InmetroConsumption
+
 data class VehicleProfile(
     val id: String,
     val brand: String,
@@ -37,6 +39,36 @@ data class VehicleProfile(
       if (match != null) match.value.replace(',', '.').toFloatOrNull() ?: 50f else 50f
     } catch (_: Exception) { 50f }
   }
+
+  // ---- Compatibilidade com o restante do app (painel, OBD, simulador) ----
+  val name: String get() = fullName
+
+  val tankCapacityLiters: Double get() = getTankCapacityLiters().toDouble()
+
+  val hasTurbo: Boolean
+    get() = Regex("turbo|tsi|t-gdi|tgdi|\\btce\\b", RegexOption.IGNORE_CASE).containsMatchIn(engine)
+
+  private val isDiesel: Boolean get() = fuelType.contains("diesel", ignoreCase = true)
+
+  val maxRpm: Float get() = when {
+    isDiesel -> 4800f
+    isHybrid -> 6000f
+    else -> 6500f
+  }
+
+  val maxSpeed: Float get() = when {
+    isHybrid -> 190f
+    isDiesel -> 200f
+    else -> 220f
+  }
+
+  /** Referências oficiais Inmetro (gasolina) usadas na autonomia estimada e nas cores do consumo. */
+  val inmetroUrbanKmPerL: Double get() = InmetroConsumption.forProfile(this).cityGas.toString().toDouble()
+  val inmetroRoadKmPerL: Double get() = InmetroConsumption.forProfile(this).highwayGas.toString().toDouble()
+  val inmetroAvgKmPerL: Double get() = (inmetroUrbanKmPerL + inmetroRoadKmPerL) / 2.0
+
+  /** Consulta proprietária do SOC da bateria HV (null = usar só o PID padrão 015B). */
+  val socQuery: CustomPidQuery? get() = null
 }
 
 fun VehicleProfile.toJsonObject(): org.json.JSONObject {
@@ -526,6 +558,7 @@ data class TelemetryState(
     val tripDistanceKm: Float = 0f, // km (current trip distance)
     val rangeKm: Int = 0, // km (calculated range based on remaining fuel & consumption)
     val fuelLevelPercent: Float? = null, // % (PID 012F tank level if supported)
+    val drivingMode: String? = null, // ECO / NORMAL / SPORT if available
     val fuelFlowLitersPerHour: Float = 0f, // L/h
     val totalFuelConsumedLiters: Float = 0f, // L
     val hybridBatterySoc: Int = 0, // % (HV Battery State of Charge via Toyota 7E2/21CE)

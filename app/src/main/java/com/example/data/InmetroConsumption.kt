@@ -43,9 +43,20 @@ object InmetroConsumption {
 
     fun forProfile(name: String, isHybrid: Boolean = false): Ref {
         val key = name.lowercase()
-        return table.entries.firstOrNull { key.contains(it.key) }?.value
-            ?: if (isHybrid) Ref(16.0f, 14.0f, 11.0f, 9.5f)
-            else table["default"]!!
+        // Prefere a chave mais longa (mais específica): "corolla cross hybrid" > "corolla cross" > "corolla"
+        val best = table.entries
+            .filter { it.key != "default" && key.contains(it.key) }
+            .maxByOrNull { it.key.length }
+        // Híbrido sem entrada própria não deve herdar o consumo da versão a combustão
+        val usable = best?.takeIf { !isHybrid || it.key.contains("hybrid") || it.key.startsWith("byd") }
+        return usable?.value
+            ?: if (isHybrid) Ref(16.0f, 14.0f, 11.0f, 9.5f) else table["default"]!!
+    }
+
+    fun forProfile(profile: com.example.model.VehicleProfile): Ref {
+        val base = "${profile.brand} ${profile.model}".lowercase()
+        val text = if (profile.isHybrid && !base.contains("hybrid")) "$base hybrid" else base
+        return forProfile(text, profile.isHybrid)
     }
 
     /**

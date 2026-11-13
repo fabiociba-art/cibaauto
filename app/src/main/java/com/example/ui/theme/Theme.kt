@@ -3,33 +3,32 @@ package com.example.ui.theme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 
-private val CockpitColorScheme =
-    darkColorScheme(
-        primary = ElectricBlue,
-        onPrimary = CockpitBlack,
-        primaryContainer = ElectricBlueVariant,
-        onPrimaryContainer = TextPrimary,
-        secondary = NeonCyan,
-        onSecondary = CockpitBlack,
-        secondaryContainer = CockpitSurfaceVariant,
-        onSecondaryContainer = NeonCyan,
-        background = CockpitBlack,
-        onBackground = TextPrimary,
-        surface = CockpitSurface,
-        onSurface = TextPrimary,
-        surfaceVariant = CockpitSurfaceVariant,
-        onSurfaceVariant = TextSecondary,
-        error = StatusRed,
-        onError = TextPrimary,
-        outline = CockpitCardBorder
-    )
+private val DarkColorScheme = darkColorScheme(
+    primary = GaugeGreen,
+    onPrimary = Color.Black,
+    primaryContainer = CockpitCard,
+    onPrimaryContainer = TextWhite,
+    secondary = GaugeYellow,
+    onSecondary = Color.Black,
+    tertiary = GaugeRed,
+    background = CockpitBlack,
+    onBackground = TextWhite,
+    surface = CockpitSurface,
+    onSurface = TextWhite,
+    surfaceVariant = CockpitCard,
+    onSurfaceVariant = TextMuted,
+    outline = CockpitCardBorder
+)
 
 @Composable
-fun MyApplicationTheme(content: @Composable () -> Unit) {
-  MaterialTheme(
-      colorScheme = CockpitColorScheme,
-      typography = Typography,
-      content = content
-  )
+fun CibaAutoTheme(
+    content: @Composable () -> Unit
+) {
+    MaterialTheme(
+        colorScheme = DarkColorScheme,
+        typography = Typography,
+        content = content
+    )
 }

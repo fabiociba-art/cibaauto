@@ -1,201 +1,263 @@
 package com.example
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.model.ObdConnectionState
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.ui.screens.*
-import com.example.ui.PermissionsGate
-import com.example.ui.theme.MyApplicationTheme
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.model.DriveMode
+import com.example.ui.components.CockpitBottomBar
+import com.example.ui.screens.DashboardScreen
+import com.example.ui.screens.DiagnosticsScreen
+import com.example.ui.screens.HybridEnergyFlowScreen
+import com.example.ui.screens.SettingsScreen
+import com.example.ui.theme.CibaAutoTheme
+import com.example.ui.theme.CockpitBlack
+import com.example.viewmodel.AppScreen
 import com.example.viewmodel.CibaAutoViewModel
 
-sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
-  object Dashboard : Screen("dashboard", "Painel", Icons.Default.Dashboard)
-  object Ethanol : Screen("ethanol", "Etanol", Icons.Default.LocalGasStation)
-  object Diagnostics : Screen("diagnostics", "Diagnóstico", Icons.Default.Build)
-  object Sensors : Screen("sensors", "Sensores", Icons.Default.Memory)
-  object Charts : Screen("charts", "Gráficos", Icons.Default.ShowChart)
-  object Performance : Screen("performance", "Desempenho", Icons.Default.Timer)
-  object Trip : Screen("trip", "Viagem", Icons.Default.Navigation)
-  object History : Screen("history", "Histórico", Icons.Default.History)
-  object Vehicles : Screen("vehicles", "Veículos", Icons.Default.DirectionsCar)
-  object Settings : Screen("settings", "Ajustes", Icons.Default.Settings)
-  object Cluster : Screen("cluster", "Cluster", Icons.Default.Speed)
-  object EnergyFlow : Screen("energy_flow", "Fluxo", Icons.Default.Bolt)
+class MainActivity : ComponentActivity(), SensorEventListener {
+
+    private val viewModel: CibaAutoViewModel by viewModels()
+    private var sensorManager: SensorManager? = null
+    private var accelerometer: Sensor? = null
+
+    // Android 12+: permissão "Dispositivos próximos" pedida logo na abertura, para conectar ao OBD sozinho
+    private val bluetoothPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) viewModel.onBluetoothPermissionGranted()
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        // Mantém a tela ligada enquanto o painel está aberto (leitura contínua no carro)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Enable fullscreen immersive mode (hide status bar per user requirement)
+        val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
+        windowInsetsController.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        windowInsetsController.hide(WindowInsetsCompat.Type.statusBars())
+
+        // Setup real accelerometer sensor
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+
+        setContent {
+            CibaAutoTheme {
+                MainAppContent(viewModel = viewModel)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        accelerometer?.let {
+            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensorManager?.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
+            val x = event.values[0]
+            viewModel.updateAccelerometer(x)
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 }
 
-class MainActivity : ComponentActivity() {
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    enableEdgeToEdge()
-    setContent {
-      MyApplicationTheme {
-        PermissionsGate {
-        val viewModel: CibaAutoViewModel = viewModel()
-        val vehicle by viewModel.selectedVehicle.collectAsState()
-        val vehicles by viewModel.vehicles.collectAsState()
-        val telemetry by viewModel.telemetry.collectAsState()
-        val diagnosticCodes by viewModel.diagnosticCodes.collectAsState()
-        val readinessMonitors by viewModel.readinessMonitors.collectAsState()
-        val trips by viewModel.trips.collectAsState()
-        val ethanolHistory by viewModel.ethanolHistory.collectAsState()
-        val connectionLogs by viewModel.connectionLogs.collectAsState()
-        val btDevices by viewModel.btDevices.collectAsState()
-        val selectedBtAddress by viewModel.selectedBtAddress.collectAsState()
-        val btEnabled by viewModel.btEnabled.collectAsState()
-        val hybridScanReport by viewModel.hybridScanReport.collectAsState()
-        val hybridScanRunning by viewModel.hybridScanRunning.collectAsState()
-        val vehicleInfo by viewModel.vehicleInfo.collectAsState()
-        val vehicleInfoLoading by viewModel.vehicleInfoLoading.collectAsState()
-        val history by viewModel.history.collectAsState()
-        val isHybridPowerInverted by viewModel.isHybridPowerInverted.collectAsState()
+@Composable
+fun MainAppContent(viewModel: CibaAutoViewModel) {
+    val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    val currentScreen by viewModel.currentScreen.collectAsStateWithLifecycle()
+    val selectedProfile by viewModel.selectedProfile.collectAsStateWithLifecycle()
+    val allProfiles by viewModel.allProfiles.collectAsStateWithLifecycle()
+    val isDemoMode by viewModel.isDemoMode.collectAsStateWithLifecycle()
+    val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val connectedDevice by viewModel.connectedDevice.collectAsStateWithLifecycle()
+    val pairedDevices by viewModel.pairedDevices.collectAsStateWithLifecycle()
+    val diagnosticLogs by viewModel.diagnosticLogs.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
+    val gaugeSlots by viewModel.gaugeSlots.collectAsStateWithLifecycle()
+    val connectingAddress by viewModel.connectingAddress.collectAsStateWithLifecycle()
+    val liveDataReceived by viewModel.liveDataReceived.collectAsStateWithLifecycle()
 
-        var showSplash by remember { mutableStateOf(true) }
-        var currentScreen by remember { mutableStateOf<Screen>(Screen.Cluster) }
-        val primaryItems = remember {
-          listOf(
-              Screen.Cluster,
-              Screen.EnergyFlow,
-              Screen.Dashboard,
-              Screen.Diagnostics,
-              Screen.Settings
-          )
-        }
-
-        if (showSplash) {
-          SplashScreen(onSplashFinished = { showSplash = false })
-        } else {
-          Scaffold(
-              modifier = Modifier.fillMaxSize(),
-              bottomBar = {
-                NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 8.dp
-                ) {
-                  primaryItems.forEach { screen ->
-                    NavigationBarItem(
-                        icon = { Icon(screen.icon, contentDescription = null) },
-                        label = { Text(screen.title) },
-                        selected = currentScreen == screen,
-                        onClick = { currentScreen = screen },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    )
-                  }
-                }
-              }
-          ) { innerPadding ->
-            Box(modifier = Modifier.padding(innerPadding)) {
-              if (currentScreen !in primaryItems) {
-                BackHandler {
-                  currentScreen = Screen.Dashboard
-                }
-              }
-
-              when (currentScreen) {
-                is Screen.Dashboard -> DashboardScreen(
-                    vehicle = vehicle,
-                    telemetry = telemetry,
-                    onNavigateToEthanol = { currentScreen = Screen.Ethanol },
-                    onNavigateToVehicles = { currentScreen = Screen.Vehicles },
-                    hybridScanReport = hybridScanReport,
-                    hybridScanRunning = hybridScanRunning,
-                    onRunHybridScan = { viewModel.runHybridScan() },
-                    vehicleInfo = vehicleInfo,
-                    vehicleInfoLoading = vehicleInfoLoading,
-                    onReadVehicleInfo = { viewModel.readVehicleInfo() },
-                    onNavigateToTrip = { currentScreen = Screen.Trip },
-                    onNavigateToCharts = { currentScreen = Screen.Charts },
-                    onNavigateToSensors = { currentScreen = Screen.Sensors },
-                    onNavigateToEnergyFlow = { currentScreen = Screen.EnergyFlow },
-                    onToggleConnection = {
-                      if (telemetry.isConnected) {
-                        viewModel.disconnectObd()
-                      } else {
-                        viewModel.connectObd()
-                      }
-                    }
-                )
-                is Screen.EnergyFlow -> EnergyFlowScreen(
-                    telemetry = telemetry,
-                    vehicle = vehicle,
-                    isPowerInverted = isHybridPowerInverted,
-                    onToggleDemo = { viewModel.toggleDemoMode() },
-                    onTogglePowerInvert = { viewModel.toggleInvertHybridPowerSign() }
-                )
-                is Screen.Ethanol -> EthanolScreen(
-                    telemetry = telemetry,
-                    ethanolHistory = ethanolHistory,
-                    onBack = { currentScreen = Screen.Dashboard }
-                )
-                is Screen.Diagnostics -> DiagnosticsScreen(
-                    diagnosticCodes = diagnosticCodes,
-                    readinessMonitors = readinessMonitors,
-                    onClearCodes = { viewModel.clearDtcCodes() }
-                )
-                is Screen.Sensors -> SensorsScreen(telemetry = telemetry)
-                is Screen.Charts -> ChartsScreen(telemetry = telemetry, history = history)
-                is Screen.Performance -> PerformanceScreen()
-                is Screen.Trip -> TripScreen(telemetry = telemetry, onResetTrip = { viewModel.resetTrip() })
-                is Screen.History -> HistoryScreen(trips = trips)
-                is Screen.Vehicles -> VehiclesScreen(
-                    vehicles = vehicles,
-                    selectedVehicle = vehicle,
-                    onSelectVehicle = { selected ->
-                      viewModel.selectVehicle(selected)
-                      currentScreen = Screen.Dashboard
-                    },
-                    onSaveVehicle = { profile ->
-                      viewModel.saveVehicle(profile)
-                    },
-                    onDeleteVehicle = { id ->
-                      viewModel.deleteVehicle(id)
-                    },
-                    onResetDefaults = {
-                      viewModel.resetVehiclesToDefault()
-                    },
-                    onBack = {
-                      currentScreen = Screen.Dashboard
-                    }
-                )
-                is Screen.Cluster -> ClusterPagerScreen(telemetry = telemetry)
-                is Screen.Settings -> SettingsScreen(
-                    telemetry = telemetry,
-                    connectionLogs = connectionLogs,
-                    btDevices = btDevices,
-                    selectedBtAddress = selectedBtAddress,
-                    btEnabled = btEnabled,
-                    isPowerInverted = isHybridPowerInverted,
-                    onTogglePowerInvert = { viewModel.toggleInvertHybridPowerSign() },
-                    isDemo = telemetry.isDemoMode,
-                    onToggleDemo = { viewModel.toggleDemoMode() },
-                    onRefreshDevices = { viewModel.refreshBtDevices() },
-                    onSelectDevice = { address -> viewModel.selectBtDevice(address) },
-                    onConnect = { viewModel.connectObd() },
-                    onDisconnect = { viewModel.disconnectObd() }
-                )
-              }
-            }
-          }
-        }
-        } // PermissionsGate
-      }
+    // Faixa de status da ECU (só no modo real, com o adaptador conectado)
+    val ecuBannerText: String? = when {
+        isDemoMode || connectionState != ObdConnectionState.CONNECTED -> null
+        !liveDataReceived -> "Conectado - iniciando leitura da ECU..."
+        !telemetry.ecuLinkOk -> "Sem comunicação com a ECU — valores indisponíveis"
+        else -> null
     }
-  }
+    val ecuBannerColor = if (!liveDataReceived) Color(0xCC1E3A5F) else Color(0xCCB91C1C)
+
+    Scaffold(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CockpitBlack),
+        containerColor = CockpitBlack,
+        bottomBar = {
+            CockpitBottomBar(
+                currentScreen = currentScreen,
+                connectionState = connectionState,
+                isDemoMode = isDemoMode,
+                driveMode = telemetry.driveMode,
+                isHybridVehicle = selectedProfile.isHybrid,
+                hasFaults = diagnostics.hasFaults,
+                onScreenSelected = { viewModel.selectScreen(it) }
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = innerPadding.calculateBottomPadding())
+        ) {
+            // A faixa fica acima do conteúdo (não por cima do título das telas)
+            if (ecuBannerText != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(ecuBannerColor)
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = ecuBannerText,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .then(
+                        // Com a faixa visível ela já ocupa a barra de status: as telas não repetem esse espaço
+                        if (ecuBannerText != null) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier
+                    )
+            ) {
+            AnimatedContent(
+                targetState = currentScreen,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "screen_transition"
+            ) { screen ->
+                when (screen) {
+                    AppScreen.DASHBOARD -> {
+                        DashboardScreen(
+                            telemetry = telemetry,
+                            profile = selectedProfile,
+                            onOpenSettings = { viewModel.selectScreen(AppScreen.SETTINGS) },
+                            diagnostics = diagnostics,
+                            onOpenDiagnostics = { viewModel.selectScreen(AppScreen.DIAGNOSTICS) },
+                            gaugeSlots = gaugeSlots,
+                            onGaugeSlotChanged = { slot, id -> viewModel.setGaugeSlot(slot, id) },
+                            onResetGauges = { viewModel.resetGaugeSlots() }
+                        )
+                    }
+
+                    AppScreen.DIAGNOSTICS -> {
+                        DiagnosticsScreen(
+                            diagnostics = diagnostics,
+                            telemetry = telemetry,
+                            profile = selectedProfile,
+                            connectionState = connectionState,
+                            isDemoMode = isDemoMode,
+                            onScan = { viewModel.scanDtcs() },
+                            onClear = { viewModel.clearDtcs() },
+                            onBack = { viewModel.selectScreen(AppScreen.DASHBOARD) }
+                        )
+                    }
+
+                    AppScreen.HYBRID_FLOW -> {
+                        HybridEnergyFlowScreen(
+                            telemetry = telemetry,
+                            profile = selectedProfile,
+                            onOpenSettings = { viewModel.selectScreen(AppScreen.SETTINGS) },
+                            onBack = { viewModel.selectScreen(AppScreen.DASHBOARD) }
+                        )
+                    }
+
+                    AppScreen.SETTINGS -> {
+                        SettingsScreen(
+                            selectedProfile = selectedProfile,
+                            allProfiles = allProfiles,
+                            isDemoMode = isDemoMode,
+                            connectionState = connectionState,
+                            connectedDevice = connectedDevice,
+                            pairedDevices = pairedDevices,
+                            diagnosticLogs = diagnosticLogs,
+                            onProfileSelected = { viewModel.selectProfile(it) },
+                            onProfileUpdated = { viewModel.updateProfile(it) },
+                            onDemoModeToggled = { viewModel.setDemoMode(it) },
+                            onConnectDevice = { viewModel.connectDevice(it) },
+                            onDisconnectDevice = { viewModel.disconnectDevice() },
+                            onRefreshDevices = { viewModel.refreshDevices() },
+                            onBack = { viewModel.selectScreen(AppScreen.DASHBOARD) },
+                            connectingAddress = connectingAddress
+                        )
+                    }
+                }
+            }
+            }
+        }
+    }
 }

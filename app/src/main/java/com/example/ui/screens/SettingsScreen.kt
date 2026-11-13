@@ -1,335 +1,765 @@
 package com.example.ui.screens
 
-import android.content.Intent
-import android.provider.Settings
-import androidx.compose.foundation.BorderStroke
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.BluetoothConnected
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Terminal
+import com.example.ui.components.ProfileEditDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.model.ConnectionState
-import com.example.model.TelemetryState
-import com.example.obd.ObdManager
-import com.example.ui.theme.*
+import com.example.R
+import com.example.model.BluetoothDeviceItem
+import com.example.model.DriveMode
+import com.example.model.ObdConnectionState
+import com.example.model.VehicleProfile
+import com.example.ui.theme.CockpitBlack
+import com.example.ui.theme.CockpitCard
+import com.example.ui.theme.CockpitCardBorder
+import com.example.ui.theme.CockpitSurface
+import com.example.ui.theme.GaugeGreen
+import com.example.ui.theme.GaugeRed
+import com.example.ui.theme.GaugeYellow
+import com.example.ui.theme.TextMuted
+import com.example.ui.theme.TextWhite
 
 @Composable
 fun SettingsScreen(
-    telemetry: TelemetryState,
-    connectionLogs: List<String>,
-    btDevices: List<ObdManager.BtDeviceInfo>,
-    selectedBtAddress: String?,
-    btEnabled: Boolean,
-    isPowerInverted: Boolean = false,
-    onTogglePowerInvert: () -> Unit = {},
-    isDemo: Boolean = false,
-    onToggleDemo: () -> Unit = {},
+    selectedProfile: VehicleProfile,
+    allProfiles: List<VehicleProfile>,
+    isDemoMode: Boolean,
+    connectionState: ObdConnectionState,
+    connectedDevice: BluetoothDeviceItem?,
+    pairedDevices: List<BluetoothDeviceItem>,
+    diagnosticLogs: List<String>,
+    onProfileSelected: (VehicleProfile) -> Unit,
+    onProfileUpdated: (VehicleProfile) -> Unit = {},
+    onDemoModeToggled: (Boolean) -> Unit,
+    onConnectDevice: (BluetoothDeviceItem) -> Unit,
+    onDisconnectDevice: () -> Unit,
     onRefreshDevices: () -> Unit,
-    onSelectDevice: (String?) -> Unit,
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    connectingAddress: String? = null
 ) {
-    val context = LocalContext.current
+    BackHandler { onBack() }
+
+    var profileQuery by remember { mutableStateOf("") }
+    var profilesExpanded by remember { mutableStateOf(false) }
+    var editingProfile by remember { mutableStateOf<VehicleProfile?>(null) }
+    var selectedBrand by remember { mutableStateOf<String?>(null) }
+    val brands = remember(allProfiles) { allProfiles.map { it.brand }.distinct().sorted() }
+    val filteredProfiles = remember(allProfiles, profileQuery, selectedBrand) {
+        val q = profileQuery.trim().lowercase()
+        allProfiles.filter { p ->
+            (selectedBrand == null || p.brand == selectedBrand) &&
+                (q.isEmpty() || p.name.lowercase().contains(q) || p.engine.lowercase().contains(q))
+        }
+    }
+
+    // Bluetooth permission launcher for Android 12+ (API 31+)
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions.values.all { it }
+        if (granted) {
+            onRefreshDevices()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissionLauncher.launch(
+                arrayOf(Manifest.permission.BLUETOOTH_CONNECT)
+            )
+        } else {
+            onRefreshDevices()
+        }
+    }
+
+    var showLogs by remember { mutableStateOf(false) }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .background(CockpitBlack)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .statusBarsPadding()
     ) {
-        Column {
+        // Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.testTag("btn_settings_back")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Voltar ao Dashboard",
+                    tint = TextWhite
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "CONFIGURAÇÕES DO SISTEMA",
-                color = ElectricBlue,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
-            Text(
-                text = "Conectividade OBD-2 Real",
-                color = TextPrimary,
+                text = stringResource(R.string.settings),
                 fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = TextWhite
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "v3.1",
+                fontSize = 12.sp,
+                color = TextMuted
             )
         }
 
-        // Status de conexão
-        CockpitCard(title = "STATUS DA CONEXÃO", icon = Icons.Default.Bluetooth) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                val statusText = when (telemetry.connectionState) {
-                    ConnectionState.DISCONNECTED -> "Desconectado"
-                    ConnectionState.SEARCHING -> "Procurando adaptador..."
-                    ConnectionState.CONNECTING -> "Conectando..."
-                    ConnectionState.CONNECTED -> "Conectado — dados reais"
-                    ConnectionState.ERROR -> "Erro de conexão"
-                }
-                val statusColor = when (telemetry.connectionState) {
-                    ConnectionState.CONNECTED -> StatusGreen
-                    ConnectionState.ERROR -> StatusRed
-                    ConnectionState.SEARCHING, ConnectionState.CONNECTING -> StatusAmber
-                    else -> TextSecondary
-                }
-
-                Text(
-                    text = statusText,
-                    color = statusColor,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-
-                Text(
-                    text = if (btEnabled) "Bluetooth do sistema: LIGADO" else "Bluetooth do sistema: DESLIGADO",
-                    color = if (btEnabled) StatusGreen else StatusRed,
-                    fontSize = 12.sp
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // 1. Connection Status Banner
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("card_connection_status"),
+                    colors = CardDefaults.cardColors(containerColor = CockpitCard),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(CockpitCardBorder))
                 ) {
-                    if (telemetry.isConnected) {
-                        Button(
-                            onClick = onDisconnect,
-                            colors = ButtonDefaults.buttonColors(containerColor = StatusRed),
-                            modifier = Modifier.weight(1f)
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.BluetoothDisabled, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Desconectar", fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        Button(
-                            onClick = onConnect,
-                            colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
-                            modifier = Modifier.weight(1f),
-                            enabled = telemetry.connectionState != ConnectionState.CONNECTING &&
-                                    telemetry.connectionState != ConnectionState.SEARCHING
-                        ) {
-                            Icon(Icons.Default.Bluetooth, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(12.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            when {
+                                                isDemoMode -> GaugeYellow
+                                                connectionState == ObdConnectionState.CONNECTED -> GaugeGreen
+                                                connectionState == ObdConnectionState.CONNECTING -> GaugeYellow
+                                                else -> Color(0xFF6B7280)
+                                            }
+                                        )
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Status da Conexão",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextWhite
+                                )
+                            }
+
                             Text(
-                                if (telemetry.connectionState == ConnectionState.CONNECTING ||
-                                    telemetry.connectionState == ConnectionState.SEARCHING
-                                ) "Conectando..." else "Conectar OBD-2",
-                                fontWeight = FontWeight.Bold
+                                text = when {
+                                    isDemoMode -> "Modo Demo Ativo"
+                                    connectionState == ObdConnectionState.CONNECTED -> "Conectado"
+                                    connectionState == ObdConnectionState.CONNECTING -> "Conectando..."
+                                    connectionState == ObdConnectionState.ERROR -> "Erro de Conexão"
+                                    else -> "Desconectado"
+                                },
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when {
+                                    isDemoMode -> GaugeYellow
+                                    connectionState == ObdConnectionState.CONNECTED -> GaugeGreen
+                                    connectionState == ObdConnectionState.CONNECTING -> GaugeYellow
+                                    connectionState == ObdConnectionState.ERROR -> GaugeRed
+                                    else -> TextMuted
+                                }
                             )
+                        }
+
+                        if (connectedDevice != null && !isDemoMode) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Dispositivo: ${connectedDevice.name} (${connectedDevice.address})",
+                                fontSize = 12.sp,
+                                color = TextMuted
+                            )
+                        }
+
+                        if (connectionState == ObdConnectionState.CONNECTED) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Button(
+                                onClick = onDisconnectDevice,
+                                colors = ButtonDefaults.buttonColors(containerColor = GaugeRed),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("btn_disconnect")
+                            ) {
+                                Text("Desconectar Adaptador OBD", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Dispositivos Bluetooth
-        CockpitCard(title = "DISPOSITIVOS BLUETOOTH PAREADOS", icon = Icons.Default.Devices) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-
-                Row(
+            // 2. Demo Mode Toggle
+            item {
+                Card(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    colors = CardDefaults.cardColors(containerColor = CockpitCard),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(CockpitCardBorder))
                 ) {
-                    OutlinedButton(
-                        onClick = onRefreshDevices,
-                        modifier = Modifier.weight(1f),
-                        border = BorderStroke(1.dp, ElectricBlue)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Refresh, contentDescription = null, tint = ElectricBlue, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Atualizar lista", color = ElectricBlue, fontSize = 12.sp)
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            try {
-                                context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
-                            } catch (_: Exception) {
-                                try {
-                                    context.startActivity(Intent(Settings.ACTION_SETTINGS))
-                                } catch (_: Exception) { }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    tint = GaugeYellow,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Modo Demonstração (Sem OBD)",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextWhite
+                                )
                             }
-                        },
-                        modifier = Modifier.weight(1f),
-                        border = BorderStroke(1.dp, ElectricBlue)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Simula aceleração dinâmica, RPM, frenagens e modos elétrico/híbrido para testes na bancada.",
+                                fontSize = 12.sp,
+                                color = TextMuted
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Switch(
+                            checked = isDemoMode,
+                            onCheckedChange = onDemoModeToggled,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = TextWhite,
+                                checkedTrackColor = GaugeYellow,
+                                uncheckedThumbColor = TextMuted,
+                                uncheckedTrackColor = Color(0xFF242A36)
+                            ),
+                            modifier = Modifier.testTag("toggle_demo_mode")
+                        )
+                    }
+                }
+            }
+
+            // 3. Vehicle Profile Selection (recolhível, com filtro por marca)
+            item {
+                Column {
+                    Text(
+                        text = "Perfil do Veículo",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextWhite
+                    )
+                    Text(
+                        text = "Ajusta a capacidade do tanque e a referência de consumo Inmetro para cálculo de autonomia.",
+                        fontSize = 12.sp,
+                        color = TextMuted
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    ProfileRow(
+                        p = selectedProfile,
+                        isSelected = true,
+                        onClick = { profilesExpanded = !profilesExpanded },
+                        onEdit = { editingProfile = selectedProfile }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Default.Settings, contentDescription = null, tint = ElectricBlue, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Abrir Bluetooth", color = ElectricBlue, fontSize = 12.sp)
+                        OutlinedButton(
+                            onClick = { profilesExpanded = !profilesExpanded },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_toggle_profiles")
+                        ) {
+                            Icon(
+                                imageVector = if (profilesExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (profilesExpanded) "Fechar" else "Trocar (${allProfiles.size})")
+                        }
+
+                        Button(
+                            onClick = { editingProfile = selectedProfile },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = GaugeGreen,
+                                contentColor = CockpitBlack
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_edit_selected_profile")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Editar Perfil",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Editar Perfil", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            if (profilesExpanded) {
+                item {
+                    OutlinedTextField(
+                        value = profileQuery,
+                        onValueChange = { profileQuery = it },
+                        label = { Text("Buscar veículo") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("profile_search")
+                    )
+                }
+
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        item {
+                            BrandChip(label = "Todas", selected = selectedBrand == null) { selectedBrand = null }
+                        }
+                        items(brands) { brand ->
+                            BrandChip(label = brand, selected = selectedBrand == brand) {
+                                selectedBrand = if (selectedBrand == brand) null else brand
+                            }
+                        }
                     }
                 }
 
-                Text(
-                    text = "Selecione o adaptador OBD (ELM327 / ADB) na lista abaixo e depois toque em Conectar.",
-                    color = TextSecondary,
-                    fontSize = 12.sp
-                )
-
-                if (btDevices.isEmpty()) {
-                    Text(
-                        text = "Nenhum dispositivo pareado.\n1. Toque em \"Abrir Bluetooth\"\n2. Pareie o adaptador ELM327 / ADB\n3. Volte e toque em \"Atualizar lista\"",
-                        color = StatusAmber,
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp
-                    )
-                } else {
-                    LazyColumn(
+                item {
+                    // Lista com altura fixa e rolagem própria: não estica mais a tela inteira
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 200.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                            .height(320.dp)
                     ) {
-                        items(btDevices) { device ->
-                            val selected = device.address == selectedBtAddress
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onSelectDevice(device.address) },
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (selected) ElectricBlue.copy(alpha = 0.18f) else CockpitSurfaceVariant,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (selected) ElectricBlue else CockpitCardBorder
-                                )
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            if (device.isLikelyObd) Icons.Default.DirectionsCar else Icons.Default.Bluetooth,
-                                            contentDescription = null,
-                                            tint = if (selected) ElectricBlue else TextSecondary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(10.dp))
-                                        Column {
-                                            Text(
-                                                text = device.name,
-                                                color = TextPrimary,
-                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                                fontSize = 14.sp
-                                            )
-                                            Text(
-                                                text = device.address + if (device.isLikelyObd) "  •  provável OBD" else "",
-                                                color = if (device.isLikelyObd) StatusGreen else TextMuted,
-                                                fontSize = 11.sp
-                                            )
+                        if (filteredProfiles.isEmpty()) {
+                            Text(
+                                text = "Nenhum veículo encontrado.",
+                                fontSize = 13.sp,
+                                color = TextMuted,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                items(filteredProfiles, key = { it.id }) { p ->
+                                    ProfileRow(
+                                        p = p,
+                                        isSelected = p.id == selectedProfile.id,
+                                        onClick = {
+                                            onProfileSelected(p)
+                                            profilesExpanded = false
+                                            profileQuery = ""
+                                            selectedBrand = null
+                                        },
+                                        onEdit = {
+                                            editingProfile = p
                                         }
-                                    }
-                                    if (selected) {
-                                        Icon(
-                                            Icons.Default.CheckCircle,
-                                            contentDescription = "Selecionado",
-                                            tint = ElectricBlue,
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                    }
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Sistema Híbrido & Fluxo de Energia
-        CockpitCard(title = "SISTEMA HÍBRIDO & FLUXO DE ENERGIA", icon = Icons.Default.Bolt) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // 5. Bluetooth OBD-II Devices
+            item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Inverter sinal da potência (kW)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Column {
                         Text(
-                            "Por convenção: kW (+) = descarga/tração e kW (-) = regeneração/recarga. Ative caso sua ECU registre o inverso.",
-                            color = TextSecondary,
-                            fontSize = 11.sp
+                            text = "Dispositivos Bluetooth OBD",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextWhite
+                        )
+                        Text(
+                            text = "Adaptador ELM327 Bluetooth Classic (SPP)",
+                            fontSize = 12.sp,
+                            color = TextMuted
                         )
                     }
-                    Switch(
-                        checked = isPowerInverted,
-                        onCheckedChange = { onTogglePowerInvert() }
-                    )
+
+                    IconButton(
+                        onClick = onRefreshDevices,
+                        modifier = Modifier.testTag("btn_refresh_bt")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Atualizar dispositivos",
+                            tint = GaugeGreen
+                        )
+                    }
                 }
+            }
 
-                Divider(color = CockpitCardBorder)
+            if (pairedDevices.isEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = CockpitCard)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Bluetooth,
+                                contentDescription = null,
+                                tint = TextMuted,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Nenhum dispositivo OBD pareado encontrado",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextWhite
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Pareie o seu scanner ELM327 nas configurações Bluetooth do Android e toque no botão atualizar acima.",
+                                fontSize = 12.sp,
+                                color = TextMuted
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(pairedDevices) { dev ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("bt_device_${dev.address}"),
+                        colors = CardDefaults.cardColors(containerColor = CockpitCard),
+                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(CockpitCardBorder))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = dev.name,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextWhite
+                                )
+                                Text(
+                                    text = dev.address,
+                                    fontSize = 12.sp,
+                                    color = TextMuted
+                                )
+                            }
 
+                            // Só o dispositivo que está conectando (ou conectado) muda de aparência
+                            val isConnecting = connectionState == ObdConnectionState.CONNECTING &&
+                                dev.address == connectingAddress
+                            val isConnected = connectionState == ObdConnectionState.CONNECTED &&
+                                dev.address == connectedDevice?.address
+
+                            Button(
+                                onClick = {
+                                    if (connectionState != ObdConnectionState.CONNECTING) onConnectDevice(dev)
+                                },
+                                enabled = true,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = when {
+                                        isConnected -> GaugeGreen
+                                        isConnecting -> GaugeYellow
+                                        else -> Color(0xFF2563EB)
+                                    }
+                                ),
+                                modifier = Modifier.testTag("btn_connect_${dev.address}")
+                            ) {
+                                when {
+                                    isConnecting -> {
+                                        CircularProgressIndicator(
+                                            color = TextWhite,
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Conectando...")
+                                    }
+                                    isConnected -> Text("Conectado")
+                                    else -> Text("Conectar")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 6. Diagnostics Log Console
+            item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Modo Demonstração (Simulador)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        Text(
-                            "Simula o ciclo dinâmico completo: STANDBY → EV → HÍBRIDO → COMBUSTÃO → CARREGANDO para testes da tela de fluxo.",
-                            color = TextSecondary,
-                            fontSize = 11.sp
-                        )
-                    }
-                    Switch(
-                        checked = isDemo,
-                        onCheckedChange = { onToggleDemo() }
-                    )
-                }
-            }
-        }
-
-        // Como conectar
-        CockpitCard(title = "COMO CONECTAR", icon = Icons.Default.Info) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("1. Toque em \"Abrir Bluetooth\" e pareie o adaptador ELM327 / ADB.", color = TextSecondary, fontSize = 13.sp)
-                Text("2. Volte ao app e toque em \"Atualizar lista\".", color = TextSecondary, fontSize = 13.sp)
-                Text("3. Selecione o dispositivo na lista (marcado como \"provável OBD\" se o nome bater).", color = TextSecondary, fontSize = 13.sp)
-                Text("4. Toque em \"Conectar OBD-2\".", color = TextSecondary, fontSize = 13.sp)
-            }
-        }
-
-        // Logs
-        CockpitCard(title = "LOG DE CONEXÃO", icon = Icons.Default.List) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 180.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(connectionLogs) { log ->
                     Text(
-                        text = "• $log",
-                        color = TextMuted,
-                        fontSize = 11.sp,
-                        lineHeight = 14.sp
+                        text = "Terminal de Diagnóstico OBD",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextWhite
                     )
+
+                    OutlinedButton(onClick = { showLogs = !showLogs }) {
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (showLogs) "Ocultar" else "Ver Logs", fontSize = 12.sp)
+                    }
+                }
+
+                if (showLogs) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF090C10))
+                            .border(1.dp, CockpitCardBorder, RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        val text = if (diagnosticLogs.isEmpty()) {
+                            "Aguardando comandos OBD..."
+                        } else {
+                            diagnosticLogs.takeLast(15).joinToString("\n")
+                        }
+                        Text(
+                            text = text,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            color = GaugeGreen,
+                            lineHeight = 15.sp
+                        )
+                    }
                 }
             }
-        }
 
-        CockpitCard(title = "SOBRE O APLICATIVO", icon = Icons.Default.Info) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(text = "CIBA AUTO v1.2.0", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text(text = "Cockpit Digital Automotivo & Telemetria OBD-2 Real", color = TextSecondary, fontSize = 12.sp)
-                Text(text = "Sem simulação. Dados apenas do adaptador físico.", color = TextMuted, fontSize = 11.sp)
+            item {
+                Spacer(modifier = Modifier.height(30.dp))
+            }
+        }
+    }
+
+    if (editingProfile != null) {
+        ProfileEditDialog(
+            profile = editingProfile!!,
+            onDismiss = { editingProfile = null },
+            onSave = { updated ->
+                onProfileUpdated(updated)
+                editingProfile = null
+            }
+        )
+    }
+}
+
+@Composable
+private fun BrandChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(if (selected) GaugeGreen.copy(alpha = 0.2f) else CockpitCard)
+            .border(1.dp, if (selected) GaugeGreen else CockpitCardBorder, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (selected) GaugeGreen else TextWhite
+        )
+    }
+}
+
+@Composable
+private fun ProfileRow(
+    p: VehicleProfile,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onEdit: (() -> Unit)? = null
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .testTag("profile_${p.id}"),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) Color(0xFF1B2330) else CockpitCard
+        ),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (isSelected) GaugeGreen else CockpitCardBorder
+            )
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.DirectionsCar,
+                        contentDescription = null,
+                        tint = if (isSelected) GaugeGreen else TextMuted,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = p.name,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextWhite
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "${p.engine}  •  Tanque: ${p.tankCapacityLiters.toInt()}L  •  Inmetro: ${p.inmetroUrbanKmPerL} urb / ${p.inmetroRoadKmPerL} rod km/L",
+                    fontSize = 12.sp,
+                    color = TextMuted
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onEdit != null) {
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("btn_edit_profile_${p.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Editar ${p.name}",
+                            tint = if (isSelected) GaugeGreen else TextMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(GaugeGreen),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Selecionado",
+                            tint = CockpitBlack,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
             }
         }
     }
 }
-
-
